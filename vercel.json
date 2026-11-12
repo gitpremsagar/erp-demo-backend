@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "buildCommand": "npx prisma generate && npx tsc",
+  "builds": [
+    {
+      "src": "dist/server.js",
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": [
+          "dist/**",
+          "dist/**/*",
+          "prisma/**",
+          "node_modules/.prisma/**",
+          "node_modules/@prisma/client/**"
+        ]
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "dist/server.js"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/opening-stock/cron/record",
+      "schedule": "0 1 * * *"
+    }
+  ]
+}

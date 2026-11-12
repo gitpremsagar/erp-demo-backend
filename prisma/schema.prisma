@@ -1,0 +1,1455 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+//========================USER CENTRIC MODELS========================
+
+enum UserType {
+  SUPER_ADMIN
+  ADMIN
+  CUSTOMER
+  EMPLOYEE
+  ACCOUNTANT
+  DRIVER
+  WAREHOUSE_MANAGER
+  ORDER_MANAGER
+  PURCHASING_MANAGER
+  GUARD
+  SALES_OFFICER
+  MIS
+}
+
+enum Department {
+  WAREHOUSE
+  ADMINISTRATION
+}
+
+enum AttendanceStatus {
+  NOT_MARKED
+  IN_PROGRESS
+  PRESENT
+  HALF_DAY
+  ABSENT
+  HOLIDAY
+}
+
+enum AttendanceAction {
+  PUNCH_IN
+  PUNCH_OUT
+  ABSENT
+}
+
+enum EmployeeSalaryType {
+  MONTHLY
+  DAILY
+}
+
+enum WarehouseEmployeeCategory {
+  STAFF
+  DRIVER
+  LABOR
+  WB_LABOR
+}
+
+model User {
+  id                 String            @id @default(auto()) @map("_id") @db.ObjectId
+  email              String            @unique
+  name               String
+  password           String
+  userType           UserType          @default(CUSTOMER)
+  phone              String?
+  department         Department?       @default(WAREHOUSE)
+  warehouseCategory  WarehouseEmployeeCategory?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  StockRecord        StockRecord[]
+  // Orders for which this user is the customer
+  Order              Order[]           @relation("OrderCustomer")
+  // Orders for which this user is the order creator/admin (separate relation)
+  OrderCreatorOrders Order[]           @relation("OrderCreator")
+  DeliveryAddress    DeliveryAddress[]
+  OrderItem          OrderItem[]
+  CustomerDetail     CustomerDetail[]
+  Forecast           Forecast[]
+  ForecastItem       ForecastItem[]
+
+  SalesOfficerAssignment   SalesOfficerAssignment[] @relation("SalesOfficer")
+  DistributorAssignment    SalesOfficerAssignment[] @relation("Distributor")
+  DriverDispatchTrips           DispatchTrip[]                @relation("DriverTrips")
+  DistributorDispatchTrips      DispatchTrip[]                @relation("DistributorTrips")
+  DispatchPendingDistributors   DispatchPendingDistributor[]  @relation("DispatchPendingDistributors")
+  purchasesCreated         Purchase[]               @relation("PurchaseCreator")
+  purchasesMarkedArrived   Purchase[]               @relation("PurchaseMarkedArrivedBy")
+  purchasesMarkedUnloading Purchase[]               @relation("PurchaseMarkedUnloadingBy")
+  purchasesMarkedUnloaded  Purchase[]               @relation("PurchaseMarkedUnloadedBy")
+  purchasesMarkedCompleted Purchase[]               @relation("PurchaseMarkedCompletedBy")
+  purchasesStockAdded      Purchase[]               @relation("PurchaseStockAddedBy")
+  purchasesTargetUnloading Purchase[]               @relation("PurchaseTargetUnloadingBy")
+  SalesReturn              SalesReturn[]
+  CreditNote               CreditNote[]
+  ssforecasts              SSForecast[]
+  attendanceProfile        EmployeeAttendanceProfile?
+  attendanceRecords        AttendanceRecord[]        @relation("AttendanceEmployee")
+  attendanceRecordsMarked  AttendanceRecord[]        @relation("AttendanceMarkedBy")
+  attendanceHolidaysCreated AttendanceHoliday[]
+  attendanceMonthlyPayrolls AttendanceMonthlyPayroll[]
+  salaryAdvances            EmployeeSalaryAdvance[]
+  productAllocationsCreated ProductAllocation[]      @relation("ProductAllocationCreator")
+  productAllocationLines    ProductAllocationLine[]
+  refreshSessions           RefreshSession[]
+  PartyMonthlySalesTarget   PartyMonthlySalesTarget[]
+  PartyReportTags           PartyReportTag[]
+  CollectivePartyEntry      CollectivePartyEntry[]
+  CollectiveReportGroupMembers CollectiveReportGroupMember[]
+
+  @@index([userType])
+  @@index([department, warehouseCategory])
+}
+
+model RefreshSession {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  tokenHash String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+}
+
+model EmployeeAttendanceProfile {
+  id                   String              @id @default(auto()) @map("_id") @db.ObjectId
+  userId               String              @unique @db.ObjectId
+  workingMinutesPerDay Int                 @default(480)
+  halfDayMinutes       Int                 @default(240)
+  salaryType           EmployeeSalaryType?
+  salaryAmount         Float?
+  otEligible           Boolean             @default(false)
+  otHourlyRate         Float?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  user                 User                @relation(fields: [userId], references: [id])
+}
+
+model AttendanceRecord {
+  id             String            @id @default(auto()) @map("_id") @db.ObjectId
+  userId         String            @db.ObjectId
+  date           DateTime
+  department     Department
+  punchIn        DateTime?
+  punchOut       DateTime?
+  status         AttendanceStatus  @default(NOT_MARKED)
+  extraMinutes   Int               @default(0)
+  isManualAbsent Boolean           @default(false)
+  lastAction     AttendanceAction?
+  remark         String?
+  markedById     String            @db.ObjectId
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  user           User              @relation("AttendanceEmployee", fields: [userId], references: [id])
+  markedBy       User              @relation("AttendanceMarkedBy", fields: [markedById], references: [id])
+
+  @@unique([userId, date])
+  @@index([date, department])
+  @@index([userId])
+}
+
+model AttendanceHoliday {
+  id          String     @id @default(auto()) @map("_id") @db.ObjectId
+  date        DateTime
+  department  Department
+  name        String?
+  createdById String     @db.ObjectId
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  createdBy   User       @relation(fields: [createdById], references: [id])
+
+  @@unique([date, department])
+  @@index([department, date])
+}
+
+model AttendanceMonthlyPayroll {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId           String   @db.ObjectId
+  year             Int
+  month            Int
+  totalAdvanceDue  Float    @default(0)
+  deductionAdvance Float    @default(0)
+  deductionOther   Float    @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, year, month])
+  @@index([year, month])
+  @@index([userId])
+}
+
+model EmployeeSalaryAdvance {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  amount    Float
+  year      Int
+  month     Int
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([userId, year, month])
+}
+
+model CustomerDetail {
+  id                         String              @id @default(auto()) @map("_id") @db.ObjectId
+  dbUserId                   String              @db.ObjectId
+  dbName                     String
+  dbCategory                 DistributorCategory
+  email                      String              @unique
+  area                       String
+  state                      String
+  address                    String
+  pincode                    String?
+  vehicleType                String?
+  panNumber                  String?
+  gstinNumber                String?
+  ownerAadharNumber          Int?
+  salesOfficerName           String?
+  salesOfficerContact        String?
+  contact2                   String?
+  creditLimit                Int                 @default(0)
+  paymentTerms               PaymentTerms        @default(ADVANCE)
+  isCashDiscountAllowed      Boolean             @default(false)
+  cashDiscountPercentage     CdPercentage?
+  isSundayDispatchAllowed    Boolean             @default(false)
+  isMondayDispatchAllowed    Boolean             @default(false)
+  isTuesdayDispatchAllowed   Boolean             @default(false)
+  isWednesdayDispatchAllowed Boolean             @default(false)
+  isThursdayDispatchAllowed  Boolean             @default(false)
+  isFridayDispatchAllowed    Boolean             @default(false)
+  isSaturdayDispatchAllowed  Boolean             @default(false)
+  twoSideDistance            Int                 @default(0)
+  partyReportTagId           String?             @db.ObjectId
+  createdAt                  DateTime            @default(now())
+  updatedAt                  DateTime            @updatedAt
+  User                       User                @relation(fields: [dbUserId], references: [id])
+  PartyReportTag             PartyReportTag?     @relation(fields: [partyReportTagId], references: [id])
+
+  @@index([dbUserId])
+  @@index([area])
+  @@index([state])
+  @@index([dbCategory])
+  @@index([partyReportTagId])
+}
+
+model PartyReportTag {
+  id              String           @id @default(auto()) @map("_id") @db.ObjectId
+  name            String           @unique
+  sortOrder       Int              @default(0)
+  headerColor     String           @default("#22c55e")
+  /// Shown only on the Registered Party Sale report (excluded from Party wise Sale).
+  isRegisteredParty Boolean        @default(false)
+  salesOfficerId  String?          @db.ObjectId
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  SalesOfficer    User?            @relation(fields: [salesOfficerId], references: [id])
+  CustomerDetails CustomerDetail[]
+
+  @@index([salesOfficerId])
+}
+
+/// Per-party monthly sales targets for party-wise sales report (calendar year/month).
+model PartyMonthlySalesTarget {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  customerId     String   @db.ObjectId /// User id (CUSTOMER) — same as report customerId
+  year           Int
+  month          Int /// 1–12
+  targetAmount   Float? /// basic INR without GST
+  targetVehicles Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  User           User     @relation(fields: [customerId], references: [id])
+
+  @@unique([customerId, year, month])
+  @@index([year, month])
+  @@index([customerId])
+}
+
+enum CdPercentage {
+  POINT_5
+  POINT_75
+}
+
+enum DistributorCategory {
+  RSS
+  DISTRIBUTOR
+  SS
+  WB
+  CHK //new
+  OTHER
+}
+
+enum PaymentTerms {
+  ADVANCE
+  ONE_BILL_CREDIT
+}
+
+//========================PRODUCT CENTRIC MODELS========================
+
+enum ProductChangeType {
+  CREATE
+  UPDATE
+}
+
+model Product {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+
+  /// Basic Information ///
+  name             String
+  mrp              Int
+  productCode      String   @unique
+  lowStockLimit    Int      @default(0)
+  overStockLimit   Int      @default(0)
+  categoryId       String   @db.ObjectId
+  subCategoryId    String?  @db.ObjectId
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  grammage         Int?
+  productGroupId   String?  @db.ObjectId
+  lifeOfProduct    Float?
+  imageUrl         String?
+  cartonsPerPallet Int?
+  packetsPerCarton Int?
+  schemePercentage Float?   @default(0)
+  plantId          String?  @db.ObjectId
+  /**
+   * Nullable so legacy Mongo documents without this field remain orderable via isSet:null filters
+   */
+  isDiscontinued   Boolean? @default(false)
+  /**
+   * Optional display/order serial for admin order grid sorting.
+   * Nullable so legacy Mongo documents without this field remain readable.
+   */
+  positionSerialNumber Int?
+
+  /**
+   * External stock cross-check vs Tally / DMS (overwritten regularly; match flags are computed in UI).
+   * Nullable so legacy Mongo documents without these fields remain readable.
+   */
+  tallyQuantity     Int?
+  tallyRemark       String?
+  dmsQuantity       Int?
+  dmsRemark         String?
+  tallyQtyUpdatedAt DateTime?
+  dmsQtyUpdatedAt   DateTime?
+
+  /**
+   * Current stock-status extras (not date-scoped). Nullable so legacy Mongo documents remain readable.
+   */
+  allocation      Int?
+  dip             Int? /// Dispatch in progress
+  pendingQuantity Int?
+  arsQuantity     Int?
+  manualOrderQuantity Int?
+  requirement     Int?
+
+  /// Pricing Information ///
+  gstPercentage             Float?
+  costPricePerPacket        Float?
+  costPricePerPacketWithGst Float?
+  costPricePerCarton        Float?
+  costPricePerCartonWithGst Float?
+
+  /// Selling Price Information for Distributors ///
+  sellingPricePerPacketForDb        Float?
+  sellingPricePerPacketForDbWithGst Float?
+  sellingPricePerCartonForDb        Float?
+  sellingPricePerCartonForDbWithGst Float?
+  marginPercentageForDb             Float?
+
+  /// Selling Price Information for Distributors (RSS) ///
+  sellingPricePerPacketForRss        Float?
+  sellingPricePerPacketForRssWithGst Float?
+  sellingPricePerCartonForRss        Float?
+  sellingPricePerCartonForRssWithGst Float?
+  marginPercentageForRss             Float?
+
+  marginDiff Float?
+
+  /// Festive pricing (optional; set by admin during festive seasons)
+  festivePricePerPacket Float?
+  festivePricePerCarton Float?
+
+  /// RELATIONS ///
+  Plant               Plant?                @relation(fields: [plantId], references: [id])
+  Category            Category              @relation(fields: [categoryId], references: [id])
+  SubCategory         SubCategory?          @relation(fields: [subCategoryId], references: [id])
+  ProductGroup        ProductGroup?         @relation(fields: [productGroupId], references: [id])
+  ProductTagRelation  ProductTagRelation[]
+  OrderItem           OrderItem[]
+  StockRecord         StockRecord[]
+  StockBatch          StockBatch[]
+  PurchaseStockBatch  PurchaseStockBatch[]
+  OpeningStock        OpeningStock[]
+  DailyStockStatus    DailyStockStatus[]
+  ProductMonthlyPurchaseForecast ProductMonthlyPurchaseForecast[]
+  ForecastItem        ForecastItem[]
+  PurchaseInvoiceItem PurchaseInvoiceItem[]
+  ProductScheme       ProductScheme[]
+  SalesReturnItem     SalesReturnItem[]
+  CreditNoteItem      CreditNoteItem[]
+  ssforecastItems     SSForecastItem[]
+  ProductChangeHistory ProductChangeHistory[]
+  ProductAllocation    ProductAllocation[]
+
+  @@index([categoryId])
+  @@index([subCategoryId])
+  @@index([productGroupId])
+  @@index([plantId])
+  @@index([name])
+  @@index([positionSerialNumber])
+  @@index([createdAt])
+}
+
+/// Full product snapshot recorded on every create/update.
+model ProductChangeHistory {
+  id         String            @id @default(auto()) @map("_id") @db.ObjectId
+  productId  String            @db.ObjectId
+  changeType ProductChangeType
+  changedAt  DateTime          @default(now())
+
+  name             String
+  mrp              Int
+  productCode      String
+  lowStockLimit    Int
+  overStockLimit   Int
+  categoryId       String   @db.ObjectId
+  subCategoryId    String?  @db.ObjectId
+  grammage         Int?
+  productGroupId   String?  @db.ObjectId
+  lifeOfProduct    Float?
+  imageUrl         String?
+  cartonsPerPallet Int?
+  packetsPerCarton Int?
+  schemePercentage Float?
+  plantId          String?  @db.ObjectId
+  isDiscontinued   Boolean?
+  positionSerialNumber Int?
+
+  gstPercentage             Float?
+  costPricePerPacket        Float?
+  costPricePerPacketWithGst Float?
+  costPricePerCarton        Float?
+  costPricePerCartonWithGst Float?
+
+  sellingPricePerPacketForDb        Float?
+  sellingPricePerPacketForDbWithGst Float?
+  sellingPricePerCartonForDb        Float?
+  sellingPricePerCartonForDbWithGst Float?
+  marginPercentageForDb             Float?
+
+  sellingPricePerPacketForRss        Float?
+  sellingPricePerPacketForRssWithGst Float?
+  sellingPricePerCartonForRss        Float?
+  sellingPricePerCartonForRssWithGst Float?
+  marginPercentageForRss             Float?
+
+  marginDiff Float?
+
+  festivePricePerPacket Float?
+  festivePricePerCarton Float?
+
+  categoryName     String?
+  subCategoryName  String?
+  productGroupName String?
+  plantName        String?
+  tagIds           String[] @db.ObjectId
+  tagNames         String[]
+
+  createdAt DateTime @default(now())
+  Product   Product  @relation(fields: [productId], references: [id])
+
+  @@index([productId])
+  @@index([productId, changedAt])
+}
+
+//New Model
+model ProductScheme {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  schemePercentage Float    @default(0)
+  // 4-slab scheme (based on CB/item quantity)
+  // Kept these fields nullable for backward compatibility with existing documents.
+  slab1MinCb       Int?
+  slab1MaxCb       Int?
+  slab1Percent     Float?
+  slab2MinCb       Int?
+  slab2MaxCb       Int?
+  slab2Percent     Float?
+  slab3MinCb       Int?
+  slab3MaxCb       Int?
+  slab3Percent     Float?
+  slab4MinCb       Int?
+  slab4MaxCb       Int?
+  slab4Percent     Float?
+  startDate        DateTime
+  endDate          DateTime
+  isActive         Boolean  @default(false)
+  productId        String   @db.ObjectId
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  Product          Product  @relation(fields: [productId], references: [id])
+
+  @@index([productId])
+  @@index([startDate, endDate])
+  @@index([isActive])
+}
+
+model Plant {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  location  String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  Product   Product[]
+  // StockBatch StockBatch[]
+}
+
+model ProductGroup {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  Product   Product[]
+}
+
+model ProductTag {
+  id                 String               @id @default(auto()) @map("_id") @db.ObjectId
+  name               String
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  ProductTagRelation ProductTagRelation[]
+}
+
+model ProductTagRelation {
+  id           String     @id @default(auto()) @map("_id") @db.ObjectId
+  productId    String     @db.ObjectId
+  productTagId String     @db.ObjectId
+  Product      Product    @relation(fields: [productId], references: [id])
+  ProductTag   ProductTag @relation(fields: [productTagId], references: [id])
+
+  @@index([productId])
+  @@index([productTagId])
+}
+
+model ColorCode {
+  id                    String   @id @default(auto()) @map("_id") @db.ObjectId
+  lowStockAlertColor    String   @default("#008000") // green
+  lowStockAlertMessage  String   @default("Low Stock")
+  overStockAlertColor   String   @default("#FF0000") // red
+  overStockAlertMessage String   @default("Over Stock")
+  inStockAlertColor     String   @default("#00008B") // blue
+  inStockAlertMessage   String   @default("In Stock")
+  expiryAlertColor      String   @default("#FF0000") // red
+  expiryAlertMessage    String   @default("Expired")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+model Category {
+  id          String        @id @default(auto()) @map("_id") @db.ObjectId
+  name        String        @unique
+  description String
+  /// Position of the category for ordering products/categories in the UI
+  position    Int           @default(0)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  Product     Product[]
+  SubCategory SubCategory[]
+
+  @@index([position])
+}
+
+model SubCategory {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  description String
+  categoryId  String    @db.ObjectId
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  Category    Category  @relation(fields: [categoryId], references: [id])
+  Product     Product[]
+
+  @@unique([categoryId, name])
+  @@index([categoryId])
+}
+
+model StockBatch {
+  id                      String                     @id @default(auto()) @map("_id") @db.ObjectId
+  productId               String                     @db.ObjectId
+  manufacturingDate       DateTime
+  arrivalDate             DateTime
+  expiryDate              DateTime
+  // plantId           String?       @db.ObjectId
+  stockQuantity           Int                        @default(0)
+  isArchived              Boolean                    @default(false)
+  purchaseId              String?                    @db.ObjectId
+  purchaseInvoiceId       String?                    @db.ObjectId
+  purchaseTransportStatus PURCHASE_TRANSPORT_STATUS? @default(PENDING)
+  createdAt               DateTime                   @default(now())
+  updatedAt               DateTime                   @updatedAt
+  product                 Product                    @relation(fields: [productId], references: [id])
+  StockRecord             StockRecord[]
+  Purchase                Purchase?                  @relation(fields: [purchaseId], references: [id])
+  PurchaseInvoice         PurchaseInvoice?           @relation(fields: [purchaseInvoiceId], references: [id])
+  ProductAllocationBatch  ProductAllocationBatch?
+  // Plant             Plant?        @relation(fields: [plantId], references: [id])
+
+  @@index([productId])
+  @@index([expiryDate])
+  @@index([productId, isArchived])
+  @@index([purchaseInvoiceId])
+}
+
+model StockRecord {
+  id            String                 @id @default(auto()) @map("_id") @db.ObjectId
+  productId     String                 @db.ObjectId
+  stockBatchId  String                 @db.ObjectId
+  changeType    ChangeType?
+  changeDate    DateTime?              @default(now())
+  changeInStock Int                    @default(0)
+  createdBy     String                 @db.ObjectId
+  orderId       String?                @db.ObjectId
+  salesReturnId String?                @db.ObjectId
+  creditNoteId  String?                @db.ObjectId
+  createdAt     DateTime               @default(now())
+  reason        StockRecordEntryReason
+  Product       Product                @relation(fields: [productId], references: [id])
+  StockBatch    StockBatch             @relation(fields: [stockBatchId], references: [id])
+  User          User                   @relation(fields: [createdBy], references: [id])
+  Order         Order?                 @relation(fields: [orderId], references: [id])
+  SalesReturn   SalesReturn?           @relation(fields: [salesReturnId], references: [id])
+  CreditNote    CreditNote?            @relation(fields: [creditNoteId], references: [id])
+
+  @@index([productId])
+  @@index([stockBatchId])
+  @@index([orderId])
+  @@index([salesReturnId])
+  @@index([creditNoteId])
+  @@index([createdAt])
+  @@index([productId, createdAt])
+}
+
+enum ChangeType {
+  INCREASE
+  DECREASE
+}
+
+enum StockRecordEntryReason {
+  ARRIVAL_FROM_SUPPLIER
+  ASSIGNED_TO_ORDER
+  GIFTED
+  RETURNED
+  CREDIT_NOTE
+  DAMAGED
+  CORRECTION_BY_ADMIN
+  RELEASED_FROM_ORDER
+}
+
+/// Daily opening stock snapshot: one row per product per calendar day (recorded at 2 AM or via button).
+model OpeningStock {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  snapshotDate DateTime /// Start of day (e.g. 2 AM snapshot is stored for that day)
+  productId    String   @db.ObjectId
+  quantity     Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  Product      Product  @relation(fields: [productId], references: [id])
+
+  @@unique([snapshotDate, productId])
+  @@index([snapshotDate])
+  @@index([productId])
+}
+
+/// Date-scoped stock-status extras (allocation, DIP, tally/DMS, etc.).
+/// Separate from OpeningStock so snapshot rebuilds do not wipe edits.
+model DailyStockStatus {
+  id                  String    @id @default(auto()) @map("_id") @db.ObjectId
+  snapshotDate        DateTime /// IST start-of-day (same convention as OpeningStock)
+  productId           String    @db.ObjectId
+  allocation          Int?
+  dip                 Int? /// Dispatch in progress
+  pendingQuantity     Int?
+  arsQuantity         Int?
+  manualOrderQuantity Int?
+  requirement         Int?
+  tallyQuantity       Int?
+  tallyRemark         String?
+  dmsQuantity         Int?
+  dmsRemark           String?
+  tallyQtyUpdatedAt   DateTime?
+  dmsQtyUpdatedAt     DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  Product             Product   @relation(fields: [productId], references: [id])
+
+  @@unique([snapshotDate, productId])
+  @@index([snapshotDate])
+  @@index([productId])
+}
+
+/// Monthly purchase forecast quantity (cartons) per product (Forecast Analysis on order v2).
+/// Billed/Due are derived from purchase invoices — not stored here.
+model ProductMonthlyPurchaseForecast {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  productId        String   @db.ObjectId
+  yearMonth        String /// "YYYY-MM" IST calendar month
+  forecastQuantity Int?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  Product          Product  @relation(fields: [productId], references: [id])
+
+  @@unique([productId, yearMonth])
+  @@index([yearMonth])
+  @@index([productId])
+}
+
+//========================ORDER CENTRIC MODELS========================
+
+/// Dynamic order status types (admin-managed). Use this for flexible statuses.
+/// The legacy OrderStatus enum is kept for backward compatibility; prefer OrderStatusType when available.
+model OrderStatusType {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  name        String   @unique // e.g. "PENDING", "COMPLETED" - code used in logic/API
+  displayName String? // optional label for UI
+  sortOrder   Int      @default(0) // for consistent ordering in dropdowns/lists
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  Order       Order[]
+
+  @@index([sortOrder])
+}
+
+model Order {
+  id                String      @id @default(auto()) @map("_id") @db.ObjectId
+  orderCreatorId    String?     @db.ObjectId
+  OrderCreator      User?       @relation("OrderCreator", fields: [orderCreatorId], references: [id]) //new
+  customeOrderId    String      @unique @default(uuid())
+  totalPrice        Int?        @default(0)
+  orderDate         DateTime    @default(now())
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  deliveryDate      DateTime? /// new field to store the delivery date of the order
+  completionDate    DateTime? /// new field to store the completion date of the order
+  customerId        String      @db.ObjectId
+  vehicleId         String?     @db.ObjectId
+  deliveryAddressId String?     @db.ObjectId
+  originalOrderId   String?     @db.ObjectId
+  stockRecordId     String?     @db.ObjectId
+  status            OrderStatus @default(PENDING)
+  orderStatusTypeId String?     @db.ObjectId
+  driverId          String?     @db.ObjectId
+  dispatchTripId    String?     @db.ObjectId
+
+  /// Verification ///
+  isVerifiedByAdmin Boolean?  @default(false)
+  verifiedByAdminId String?   @db.ObjectId
+  verifiedAt        DateTime?
+
+  /// Admin discount (percentage 0–100), applies to this order only
+  discountPercent Float?
+
+  /// Cash discount percentage (0.5 or 0.75), applied on total taxable amount
+  cashDiscountPercent Float?
+
+  /// Signed adjustment applied to invoice value (positive adds, negative subtracts from amount after cash discount).
+  ledgerBalance Float?
+
+  /// Admin-only free-text note for this order.
+  narration String?
+
+  /// false = distributor is still editing; hidden from admin until finalized ("Send to SS"). Default true for non–distributor-created orders.
+  isFinalizedByDistributor Boolean @default(true)
+
+  /// Whether goods for this order have been received (sales history tracking).
+  receivingStatus ReceivingStatus @default(PENDING)
+
+  /// Tally invoice ID linking this order to Tally (e.g. SGT/26-27/1). Null for drafts / legacy.
+  /// Uniqueness enforced in app (MongoDB unique indexes reject multiple nulls).
+  tallyInvoiceId String?
+
+  /// Excel order sheet (create-new-order-v2) metadata
+  dmsInvoiceNumber    String?
+  tripNumber          Int?
+  /// Column group tag: TRIP_1…TRIP_8, LCVS, DRAFTS, ADVANCE_DMS
+  sheetTag            String?
+  tallyValue          Float?
+  dmsValue            Float?
+  diffReason          String?
+  valuesAutoMatched   Boolean? @default(false)
+  isManuallyConfirmed Boolean? @default(false)
+
+  Customer        User             @relation("OrderCustomer", fields: [customerId], references: [id])
+  Vehicle         Vehicle?         @relation(fields: [vehicleId], references: [id])
+  DeliveryAddress DeliveryAddress? @relation(fields: [deliveryAddressId], references: [id])
+  OrderStatusType OrderStatusType? @relation(fields: [orderStatusTypeId], references: [id])
+  OrderItem       OrderItem[]
+  StockRecord     StockRecord[]
+  DispatchTrip    DispatchTrip?
+  SalesReturn     SalesReturn[]
+  CreditNote      CreditNote[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([orderDate])
+  @@index([driverId])
+  @@index([orderStatusTypeId])
+  @@index([customerId, orderDate])
+  @@index([tallyInvoiceId])
+}
+
+/// Per financial-year counter for auto-generating Tally invoice IDs (SGT/YY-YY/N).
+model TallyInvoiceCounter {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  financialYear  String   @unique /// Short FY e.g. "26-27" (Apr–Mar)
+  nextNumber     Int      @default(1)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+enum OrderStatus {
+  PENDING
+  MODIFYING
+  PACKING_PENDING
+  PACKING
+  APPROVAL_PENDING
+  BILLED
+  SHIPPING_PENDING
+  SHIPPING
+  DELIVERED
+  COMPLETED
+}
+
+enum ReceivingStatus {
+  PENDING
+  RECEIVED
+}
+
+/// Which Product price band was snapshotted onto the line (RSS / SS cost / DB selling)
+enum OrderItemPricingTier {
+  RSS
+  SS
+  DB
+}
+
+model OrderItem {
+  id                          String                @id @default(auto()) @map("_id") @db.ObjectId
+  orderId                     String                @db.ObjectId
+  productId                   String                @db.ObjectId
+  quantity                    Int
+  createdAt                   DateTime              @default(now())
+  updatedAt                   DateTime              @updatedAt
+  orderDate                   DateTime?
+  deliveryDate                DateTime?
+  orderCompleted              Boolean               @default(false)
+  schemeDiscountPercent       Float?                @default(0)
+  /// Admin-set per-line discount % (scheme-like: % of basic, before GST). Optional.
+  itemDiscountPercent         Float?                @default(0)
+  /// At stock assignment: tier pair + gstPercentage + packetsPerCarton snapshot; unused tier price fields stay null.
+  pricingTier                 OrderItemPricingTier?
+  gstPercentage               Float?
+  /// Product packets/carton at snapshot time; invoice carton rate uses packet × this when > 0, else snapshot carton field.
+  packetsPerCarton            Int?
+  costPricePerCarton          Float?
+  costPricePerPacket          Float?
+  sellingPricePerCartonForDb  Float?
+  sellingPricePerPacketForDb  Float?
+  sellingPricePerCartonForRss Float?
+  sellingPricePerPacketForRss Float?
+  isFestivePrice              Boolean?              @default(false)
+  Order                       Order                 @relation(fields: [orderId], references: [id])
+  Product                     Product               @relation(fields: [productId], references: [id])
+  customerId                  String                @db.ObjectId
+  Customer                    User                  @relation(fields: [customerId], references: [id])
+
+  @@index([orderId])
+  @@index([productId])
+  @@index([customerId])
+  @@index([orderId, productId])
+  @@index([productId, orderDate])
+}
+
+model DeliveryAddress {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId          String   @db.ObjectId
+  default         Boolean  @default(false)
+  address         String
+  twoSideDistance Int      @default(0)
+  pincode         String   @default("000000")
+  state           String   @default("NOT_SET")
+  area            String   @default("NOT_SET") // new field
+  vehicleType     String   @default("NOT_SET") // new field
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  User            User     @relation(fields: [userId], references: [id])
+  Order           Order[]
+
+  @@index([userId])
+}
+
+model OriginalOrder {
+  id                String              @id @default(auto()) @map("_id") @db.ObjectId
+  originalOrderId   String              @db.ObjectId
+  orderDate         DateTime
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  OriginalOrderItem OriginalOrderItem[]
+
+  @@index([originalOrderId])
+  @@index([orderDate])
+}
+
+model OriginalOrderItem {
+  id              String        @id @default(auto()) @map("_id") @db.ObjectId
+  originalOrderId String        @db.ObjectId
+  productId       String        @db.ObjectId
+  quantity        Int
+  OriginalOrder   OriginalOrder @relation(fields: [originalOrderId], references: [id])
+
+  @@index([originalOrderId])
+  @@index([productId])
+}
+
+model DispatchTrip {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  tripNumber      Int      @default(1)
+  tripDate        DateTime @default(now())
+  distributorId   String?  @db.ObjectId
+  orderId         String?  @unique @db.ObjectId
+  vehicleId       String?  @db.ObjectId
+  driverId        String?  @db.ObjectId
+  remarks         String?
+  vehiclePosition Int?     @default(1) //new field to store the position of the vehicle in the trip
+  Vehicle         Vehicle? @relation(fields: [vehicleId], references: [id])
+  Driver          User?    @relation("DriverTrips", fields: [driverId], references: [id])
+  Order           Order?   @relation(fields: [orderId], references: [id])
+  Distributor     User?    @relation("DistributorTrips", fields: [distributorId], references: [id])
+  updatedAt       DateTime @updatedAt
+}
+
+model DispatchPendingDistributor {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  distributorId  String   @db.ObjectId
+  remarks        String?
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  Distributor    User     @relation("DispatchPendingDistributors", fields: [distributorId], references: [id])
+
+  @@index([distributorId])
+  @@index([sortOrder])
+}
+
+model Forecast {
+  id            String         @id @default(auto()) @map("_id") @db.ObjectId
+  distributorId String         @db.ObjectId
+  forecastDate  DateTime
+  createdAt     DateTime       @default(now())
+  ForecastItem  ForecastItem[]
+  Distributor   User           @relation(fields: [distributorId], references: [id])
+
+  @@index([distributorId])
+  @@index([forecastDate])
+  @@index([distributorId, forecastDate])
+}
+
+// model OrderForecast {
+model ForecastItem {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  productId     String   @db.ObjectId
+  distributorId String   @db.ObjectId
+  forecastId    String   @db.ObjectId
+  forecastDate  DateTime
+  quantity      Int
+  createdAt     DateTime @default(now())
+  Distributor   User     @relation(fields: [distributorId], references: [id])
+  Product       Product  @relation(fields: [productId], references: [id])
+  Forecast      Forecast @relation(fields: [forecastId], references: [id])
+
+  @@index([productId])
+  @@index([distributorId])
+  @@index([forecastId])
+  @@index([forecastDate])
+}
+
+//========================VEHICLE CENTRIC MODELS========================
+
+model VehicleType {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  name      String    @unique
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  Vehicle   Vehicle[]
+}
+
+model Vehicle {
+  id            String         @id @default(auto()) @map("_id") @db.ObjectId
+  vehicleName   String
+  vehicleNumber String         @unique
+  vehicleTypeId String         @db.ObjectId
+  capacity      Int
+  mileage       Float? /// km per liter for fuel consumption reports
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  VehicleType            VehicleType             @relation(fields: [vehicleTypeId], references: [id])
+  Order                  Order[]
+  DispatchTrip           DispatchTrip[]
+  FuelConsumptionRecord  FuelConsumptionRecord[]
+
+  @@index([vehicleTypeId])
+}
+
+model FuelConsumptionRecord {
+  id                   String   @id @default(auto()) @map("_id") @db.ObjectId
+  vehicleId            String   @db.ObjectId
+  year                 Int
+  month                Int /// 1–12
+  actualFuelFirstHalf  Float? /// liters, admin-entered
+  actualFuelSecondHalf Float? /// liters, admin-entered
+  meterReadingDay1     Float? /// odometer on 1st of month
+  meterReadingDay16    Float? /// odometer on 16th of month
+  meterReadingLastDay  Float? /// odometer on last day of month
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  Vehicle              Vehicle  @relation(fields: [vehicleId], references: [id])
+
+  @@unique([vehicleId, year, month])
+  @@index([year, month])
+  @@index([vehicleId])
+}
+
+// ==========================PURCHASE CENTRIC MODELS=========================
+
+model Purchase {
+  id                      String    @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseDate            DateTime  @default(now())
+  createdByUserId         String    @db.ObjectId
+  CreatedByUser           User      @relation("PurchaseCreator", fields: [createdByUserId], references: [id])
+  markedArrivedByUserId   String?   @db.ObjectId
+  MarkedArrivedByUser     User?     @relation("PurchaseMarkedArrivedBy", fields: [markedArrivedByUserId], references: [id])
+  markedArrivedAt         DateTime?
+  markedUnloadingByUserId String?   @db.ObjectId
+  MarkedUnloadingByUser   User?     @relation("PurchaseMarkedUnloadingBy", fields: [markedUnloadingByUserId], references: [id])
+  markedUnloadingAt       DateTime?
+  markedUnloadedAt        DateTime?
+  markedCompletedAt       DateTime?
+  markedUnloadedByUserId  String?   @db.ObjectId
+  MarkedUnloadedByUser    User?     @relation("PurchaseMarkedUnloadedBy", fields: [markedUnloadedByUserId], references: [id])
+  markedCompletedByUserId String?   @db.ObjectId
+  MarkedCompletedByUser   User?     @relation("PurchaseMarkedCompletedBy", fields: [markedCompletedByUserId], references: [id])
+  TargetUnloadingDate     DateTime?
+  TargetUnloadingByUserId String?   @db.ObjectId
+  TargetUnloadingByUser   User?     @relation("PurchaseTargetUnloadingBy", fields: [TargetUnloadingByUserId], references: [id])
+  VehicleExitedAt         DateTime?
+  stockAddedAt            DateTime?
+  stockAddedByUserId      String?   @db.ObjectId
+  StockAddedByUser        User?     @relation("PurchaseStockAddedBy", fields: [stockAddedByUserId], references: [id])
+
+  transporterId           String                    @db.ObjectId
+  vehicleNumber           String?
+  driverContact           String?
+  grnNumber               String?
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
+  purchaseTransportStatus PURCHASE_TRANSPORT_STATUS @default(PENDING)
+  Transporter             Transporter               @relation(fields: [transporterId], references: [id])
+  PurchaseInvoice         PurchaseInvoice[]
+  stockBatches            StockBatch[]
+  purchaseStockBatches    PurchaseStockBatch[]
+}
+
+model PurchaseStockBatch {
+  id                      String                     @id @default(auto()) @map("_id") @db.ObjectId
+  productId               String                     @db.ObjectId
+  purchaseId              String                     @db.ObjectId
+  manufacturingDate       DateTime
+  arrivalDate             DateTime
+  expiryDate              DateTime
+  stockQuantity           Int                        @default(0)
+  purchaseTransportStatus PURCHASE_TRANSPORT_STATUS? @default(PENDING)
+  createdAt               DateTime                   @default(now())
+  updatedAt               DateTime                   @updatedAt
+  product                 Product                    @relation(fields: [productId], references: [id])
+  Purchase                Purchase                   @relation(fields: [purchaseId], references: [id])
+
+  @@index([productId])
+  @@index([purchaseId])
+  @@index([purchaseId, purchaseTransportStatus])
+}
+
+model Transporter {
+  id                 String     @id @default(auto()) @map("_id") @db.ObjectId
+  name               String
+  transporterContact String?
+  area               String?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  purchases          Purchase[]
+}
+
+enum PURCHASE_TRANSPORT_STATUS {
+  PENDING
+  LOADING
+  LOADED
+  IN_TRANSIT
+  ARRIVED
+  UNLOADING
+  UNLOADED
+  EXITED
+  COMPLETED
+}
+
+model PurchaseInvoice {
+  id                  String                @id @default(auto()) @map("_id") @db.ObjectId
+  invoiceID           String?
+  invoiceDate         DateTime?
+  invoiceAmount       Float?
+  purchaseId          String                @db.ObjectId
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+  PurchaseInvoiceItem PurchaseInvoiceItem[]
+  purchase            Purchase?             @relation(fields: [purchaseId], references: [id])
+  StockBatch          StockBatch[]
+
+  @@index([invoiceDate])
+}
+
+// ==========================PRODUCT ALLOCATION==========================
+
+/// Admin allocation of a high-demand product across one or more stock batches.
+model ProductAllocation {
+  id              String                   @id @default(auto()) @map("_id") @db.ObjectId
+  productId       String                   @db.ObjectId
+  allocationDate  DateTime
+  receivedQty     Int
+  notes           String?
+  createdByUserId String                   @db.ObjectId
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+  Product         Product                  @relation(fields: [productId], references: [id])
+  CreatedByUser   User                     @relation("ProductAllocationCreator", fields: [createdByUserId], references: [id])
+  lines           ProductAllocationLine[]
+  batches         ProductAllocationBatch[]
+
+  @@index([productId])
+  @@index([allocationDate])
+}
+
+/// Links an allocation to one stock batch (each batch may belong to at most one allocation).
+model ProductAllocationBatch {
+  id            String            @id @default(auto()) @map("_id") @db.ObjectId
+  allocationId  String            @db.ObjectId
+  stockBatchId  String            @unique @db.ObjectId
+  createdAt     DateTime          @default(now())
+  allocation    ProductAllocation @relation(fields: [allocationId], references: [id], onDelete: Cascade)
+  stockBatch    StockBatch        @relation(fields: [stockBatchId], references: [id])
+
+  @@index([allocationId])
+}
+
+model ProductAllocationLine {
+  id            String                          @id @default(auto()) @map("_id") @db.ObjectId
+  allocationId  String                          @db.ObjectId
+  customerId    String                          @db.ObjectId
+  allocatedQty  Int
+  createdAt     DateTime                        @default(now())
+  updatedAt     DateTime                        @updatedAt
+  allocation    ProductAllocation               @relation(fields: [allocationId], references: [id], onDelete: Cascade)
+  customer      User                            @relation(fields: [customerId], references: [id])
+  fulfillments  ProductAllocationFulfillment[]
+
+  @@unique([allocationId, customerId])
+  @@index([customerId])
+}
+
+model ProductAllocationFulfillment {
+  id               String                @id @default(auto()) @map("_id") @db.ObjectId
+  allocationLineId String                @db.ObjectId
+  billDate         DateTime
+  billQty          Int
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  line             ProductAllocationLine @relation(fields: [allocationLineId], references: [id], onDelete: Cascade)
+
+  @@index([allocationLineId])
+}
+
+model PurchaseInvoiceItem {
+  id                 String          @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseInvoiceId  String          @db.ObjectId
+  productId          String          @db.ObjectId
+  /// Snapshotted at purchase create/update/sync from Product master.
+  mrp                Int?
+  gstPercentage      Float?
+  packetsPerCarton   Int?
+  costPricePerPacket Float?
+  costPricePerCarton Float?
+  palletQuantity     Int
+  quantity           Int
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  PurchaseInvoice    PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id])
+  product            Product         @relation(fields: [productId], references: [id])
+
+  @@index([purchaseInvoiceId])
+  @@index([productId])
+}
+
+// ==========================SALES RETURN CENTRIC MODELS==========================
+
+model SalesReturn {
+  id              String            @id @default(auto()) @map("_id") @db.ObjectId
+  customerId      String            @db.ObjectId
+  orderId         String            @db.ObjectId
+  returnDate      DateTime          @default(now())
+  returnReason    String
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  customer        User              @relation(fields: [customerId], references: [id])
+  order           Order             @relation(fields: [orderId], references: [id])
+  SalesReturnItem SalesReturnItem[]
+  StockRecord     StockRecord[]
+}
+
+model SalesReturnItem {
+  id            String      @id @default(auto()) @map("_id") @db.ObjectId
+  salesReturnId String      @db.ObjectId
+  productId     String      @db.ObjectId
+  quantity      Int
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  SalesReturn   SalesReturn @relation(fields: [salesReturnId], references: [id])
+  Product       Product     @relation(fields: [productId], references: [id])
+}
+
+model CreditNote {
+  id             String           @id @default(auto()) @map("_id") @db.ObjectId
+  customerId     String           @db.ObjectId
+  orderId        String           @db.ObjectId
+  noteDate       DateTime         @default(now())
+  noteReason     String
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  customer       User             @relation(fields: [customerId], references: [id])
+  order          Order            @relation(fields: [orderId], references: [id])
+  CreditNoteItem CreditNoteItem[]
+  StockRecord    StockRecord[]
+}
+
+model CreditNoteItem {
+  id           String     @id @default(auto()) @map("_id") @db.ObjectId
+  creditNoteId String     @db.ObjectId
+  productId    String     @db.ObjectId
+  quantity     Int
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  CreditNote   CreditNote @relation(fields: [creditNoteId], references: [id])
+  Product      Product    @relation(fields: [productId], references: [id])
+}
+
+// ==========================SHIPMENT TARGET (Haldiram quarterly targets)==========================
+
+model ShipmentTarget {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  financialYear String // e.g. "2025-26"
+  quarter       Int // 1, 2, 3 or 4
+  targetAmount  Float // target in basic value (INR)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([financialYear, quarter])
+  @@index([financialYear])
+}
+
+// ==========================SHIPMENT VS ACHIEVE (monthly manual fields, live FY)==========================
+
+model ShipmentVsAchieveMonth {
+  id                 String   @id @default(auto()) @map("_id") @db.ObjectId
+  financialYear      String // e.g. "2026-27"
+  monthIndex         Int // 0=Apr … 11=Mar
+  targetBasic        Float?
+  incentive          Float?
+  dmsBasic           Float?
+  carDms             Float?
+  schemeReceived     String?
+  schemeReleased     String?
+  incentiveReceived  String?
+  incentiveReleased  String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([financialYear, monthIndex])
+  @@index([financialYear])
+}
+
+// ==========================MONTH-WISE SALES REPORT (annual FY report)==========================
+
+model MonthWiseSalesReport {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  financialYear String // e.g. "2025-26"
+  monthIndex    Int // 0=Apr … 11=Mar
+  primaryTarget Float?
+  dmsAchieved   Float?
+  remark        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([financialYear, monthIndex])
+  @@index([financialYear])
+}
+
+// ==========================MONTH-WISE PURCHASE REPORT (annual FY report)==========================
+
+model MonthWisePurchaseReport {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  financialYear String // e.g. "2025-26"
+  monthIndex    Int // 0=Apr … 11=Mar
+  target        Float?
+  remark        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([financialYear, monthIndex])
+  @@index([financialYear])
+}
+
+// ==========================COLLECTIVE SHIPMENT & PRIMARY REPORT (annual FY report)==========================
+
+model CollectiveReportEntry {
+  id                      String    @id @default(auto()) @map("_id") @db.ObjectId
+  financialYear           String // e.g. "2026-27"
+  monthIndex              Int // 0=Apr … 11=Mar
+  shipmentTarget          Float?
+  cdReceivedDate          DateTime?
+  cdReceivedAmount        Float?
+  rssReceivedDate         DateTime?
+  rssReceivedAmount       Float?
+  shipmentRemark          String?
+  monSchemeReleaseDate    DateTime?
+  monSchemeReceivedAmount Float?
+  monSchemeReleasedAmount Float?
+  primaryRemark           String?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@unique([financialYear, monthIndex])
+  @@index([financialYear])
+}
+
+/// Per-customer monthly Target / DMS / Remark for the collective report (separate from PartyMonthlySalesTarget).
+model CollectivePartyEntry {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  financialYear String // e.g. "2026-27"
+  monthIndex    Int // 0=Apr … 11=Mar
+  customerId    String   @db.ObjectId
+  target        Float?
+  dms           Float?
+  remark        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  User          User     @relation(fields: [customerId], references: [id])
+
+  @@unique([financialYear, monthIndex, customerId])
+  @@index([financialYear])
+  @@index([customerId])
+}
+
+/// Customer groups for the collective report only (independent of PartyReportTag).
+model CollectiveReportGroup {
+  id        String                        @id @default(auto()) @map("_id") @db.ObjectId
+  name      String                        @unique
+  sortOrder Int                           @default(0)
+  createdAt DateTime                      @default(now())
+  updatedAt DateTime                      @updatedAt
+  members   CollectiveReportGroupMember[]
+}
+
+model CollectiveReportGroupMember {
+  id         String                @id @default(auto()) @map("_id") @db.ObjectId
+  groupId    String                @db.ObjectId
+  customerId String                @unique @db.ObjectId
+  group      CollectiveReportGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  User       User                  @relation(fields: [customerId], references: [id])
+
+  @@index([groupId])
+}
+
+// ==========================CONTACTS & DOCUMENTS=================================
+
+model Contact {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  phone     String?
+  email     String?
+  role      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Document {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  title     String
+  fileUrl   String?
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ==========================SALES OFFICER CENTRIC MODELS=========================
+
+model SalesOfficerAssignment {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  salesOfficerId String   @db.ObjectId
+  distributorId  String   @db.ObjectId
+  assignedAt     DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  SalesOfficer   User     @relation("SalesOfficer", fields: [salesOfficerId], references: [id])
+  Distributor    User     @relation("Distributor", fields: [distributorId], references: [id])
+
+  @@unique([salesOfficerId, distributorId])
+  @@index([salesOfficerId])
+  @@index([distributorId])
+}
+
+// ========================== SS Forecast Centric Models=========================
+model SSForecast {
+  id              String           @id @default(auto()) @map("_id") @db.ObjectId
+  forecastDate    DateTime
+  createdById     String           @db.ObjectId
+  createdAt       DateTime         @default(now())
+  createdBy       User             @relation(fields: [createdById], references: [id])
+  ssforecastItems SSForecastItem[]
+}
+
+model SSForecastItem {
+  id           String     @id @default(auto()) @map("_id") @db.ObjectId
+  ssForecastId String     @db.ObjectId
+  productId    String     @db.ObjectId
+  forecastDate DateTime
+  quantity     Int
+  createdAt    DateTime   @default(now())
+  SSForecast   SSForecast @relation(fields: [ssForecastId], references: [id])
+  Product      Product    @relation(fields: [productId], references: [id])
+}
