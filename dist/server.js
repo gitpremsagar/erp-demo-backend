@@ -47,6 +47,7 @@ const partyReportTag_route_1 = __importDefault(require("./route/partyReportTag.r
 const reports_route_1 = __importDefault(require("./route/reports.route"));
 const tallyInvoiceSettings_route_1 = __importDefault(require("./route/tallyInvoiceSettings.route"));
 const product_allocation_route_1 = __importDefault(require("./module/product-allocation/product-allocation.route"));
+const ai_route_1 = __importDefault(require("./module/ai/ai.route"));
 const app = (0, express_1.default)();
 // Trust Vercel / reverse-proxy forwarding for accurate req.ip and cookies.
 app.set("trust proxy", 1);
@@ -55,6 +56,7 @@ app.use((0, helmet_1.default)());
 const productionOrigins = [
     "https://www.srigopaltraders.com",
     "https://srigopaltraders.com",
+    "https://erp-demo-frontend-six.vercel.app",
 ];
 const developmentOrigins = ["http://localhost:3000"];
 const extraOrigins = (process.env.CORS_ORIGINS || "")
@@ -112,6 +114,7 @@ app.use("/api/party-report-tags", partyReportTag_route_1.default);
 app.use("/api/reports", reports_route_1.default);
 app.use("/api/tally-invoice-settings", tallyInvoiceSettings_route_1.default);
 app.use("/api/product-allocations", product_allocation_route_1.default);
+app.use("/api/ai", ai_route_1.default);
 // Local / long-running process only. On Vercel, @vercel/node imports this app.
 const isVercel = !!process.env.VERCEL;
 if (!isVercel) {

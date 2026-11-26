@@ -43,6 +43,7 @@ import partyReportTagRouteHandler from "./route/partyReportTag.route";
 import reportsRouteHandler from "./route/reports.route";
 import tallyInvoiceSettingsRouteHandler from "./route/tallyInvoiceSettings.route";
 import productAllocationRouteHandler from "./module/product-allocation/product-allocation.route";
+import aiRouteHandler from "./module/ai/ai.route";
 
 const app = express();
 
@@ -54,6 +55,7 @@ app.use(helmet());
 const productionOrigins = [
   "https://www.srigopaltraders.com",
   "https://srigopaltraders.com",
+  "https://erp-demo-frontend-six.vercel.app",
 ];
 const developmentOrigins = ["http://localhost:3000"];
 const extraOrigins = (process.env.CORS_ORIGINS || "")
@@ -118,6 +120,7 @@ app.use("/api/party-report-tags", partyReportTagRouteHandler);
 app.use("/api/reports", reportsRouteHandler);
 app.use("/api/tally-invoice-settings", tallyInvoiceSettingsRouteHandler);
 app.use("/api/product-allocations", productAllocationRouteHandler);
+app.use("/api/ai", aiRouteHandler);
 
 // Local / long-running process only. On Vercel, @vercel/node imports this app.
 const isVercel = !!process.env.VERCEL;
