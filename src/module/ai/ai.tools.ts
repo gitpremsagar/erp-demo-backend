@@ -129,7 +129,7 @@ export const AI_TOOLS = [
             type: "string",
             enum: ["any", "majority", "latest"],
             description:
-              'Which products to include: "any" = appeared in any order, "majority" = appeared in at least half the orders (default), "latest" = only the most recent order.',
+              'Which products to include: "any" = appeared in at least one of the evaluated orders (default), "majority" = appeared in at least half the orders, "latest" = only the most recent order.',
           },
           quantityRule: {
             type: "string",

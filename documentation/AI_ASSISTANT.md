@@ -80,10 +80,11 @@ quantities. The model is required to call `customer_order_history` first:
   `all` is available if the default has too few orders.
 - Aggregates each product: appearances, frequency, total/average/min/max cartons,
   last-order quantity, and the order dates.
-- Applies the requested rules. Defaults are `majority` inclusion (appears in at
-  least half the evaluated orders) and `average` quantity (rounded cartons across
-  the orders where the product appeared). `any`/`latest` inclusion and
-  `latest`/`max`/`min` quantity are available.
+- Applies the requested rules. Defaults are `any` inclusion (a product is
+  included if it appeared in at least one of the last 10 evaluated orders) and
+  `average` quantity (rounded cartons across the orders where the product
+  appeared). `majority`/`latest` inclusion and `latest`/`max`/`min` quantity are
+  available.
 - Returns the real orders and line items plus the suggested draft lines, with
   anomaly notes (latest order much smaller/larger than earlier ones, one-off
   products, volatile quantities, stale history, discontinued products) and

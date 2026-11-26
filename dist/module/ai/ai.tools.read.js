@@ -408,7 +408,7 @@ async function resolveHistoryCustomer(args) {
 async function customerOrderHistory(args) {
     const orderCount = (0, ai_utils_1.toPositiveInt)(args.orderCount, 10, 25);
     const statusScope = args.statusScope ?? "completed_or_verified";
-    const inclusionRule = args.inclusionRule ?? "majority";
+    const inclusionRule = args.inclusionRule ?? "any";
     const quantityRule = args.quantityRule ?? "average";
     const resolved = await resolveHistoryCustomer(args);
     if (!resolved.customer) {

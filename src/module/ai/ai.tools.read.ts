@@ -492,7 +492,7 @@ interface HistoryProductAggregate {
 export async function customerOrderHistory(args: CustomerOrderHistoryArgs) {
   const orderCount = toPositiveInt(args.orderCount, 10, 25);
   const statusScope = args.statusScope ?? "completed_or_verified";
-  const inclusionRule = args.inclusionRule ?? "majority";
+  const inclusionRule = args.inclusionRule ?? "any";
   const quantityRule = args.quantityRule ?? "average";
 
   const resolved = await resolveHistoryCustomer(args);
