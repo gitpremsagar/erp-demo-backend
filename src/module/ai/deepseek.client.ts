@@ -11,13 +11,31 @@ export interface DeepSeekToolCall {
   };
 }
 
+export type DeepSeekContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export interface DeepSeekMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: string | DeepSeekContentPart[] | null;
   reasoning_content?: string | null;
   tool_calls?: DeepSeekToolCall[];
   tool_call_id?: string;
   name?: string;
+}
+
+/** Model responses are text; vision requests may have had array content. */
+export function messageText(content: DeepSeekMessage["content"]): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((part): part is Extract<DeepSeekContentPart, { type: "text" }> =>
+        part.type === "text"
+      )
+      .map((part) => part.text)
+      .join("\n");
+  }
+  return "";
 }
 
 export interface DeepSeekChatResult {

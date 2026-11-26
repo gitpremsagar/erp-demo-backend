@@ -550,8 +550,7 @@ export async function proposeAddPurchaseToStock(args: {
   grnNumber?: string;
   invoiceID?: string;
   vehicleNumber?: string;
-}): Promise<AiProposal> {
-  const purchase = await resolvePurchase({
+}): Promise<AiProposal> {  const purchase = await resolvePurchase({
     purchaseId: args.purchaseId,
     grnNumber: args.grnNumber,
     invoiceID: args.invoiceID,
@@ -623,5 +622,176 @@ export async function proposeAddPurchaseToStock(args: {
       ],
     },
     risk: "high",
+  });
+}
+
+function purchaseDateLabel(value: Date | null | undefined): string {
+  return value ? istDateString(value) : "—";
+}
+
+/** Relative-friendly description of a date-only update: show the ISO date. */
+function datetimePayloadValue(
+  value: string | null | undefined,
+  field: "purchaseDate" | "other"
+): { ok: boolean; value: string | null } {
+  if (value === null) {
+    return field === "purchaseDate"
+      ? { ok: false, value: null }
+      : { ok: true, value: null };
+  }
+  if (value === undefined) return { ok: false, value: null };
+  const dateOnly = parseDateOnly(value);
+  if (!dateOnly) return { ok: false, value: null };
+  return {
+    ok: true,
+    value: new Date(`${dateOnly}T00:00:00.000+05:30`).toISOString(),
+  };
+}
+
+export async function proposeUpdatePurchaseGrn(args: {
+  purchaseId?: string;
+  vehicleNumber?: string;
+  invoiceID?: string;
+  currentGrnNumber?: string;
+  grnNumber: string;
+}): Promise<AiProposal> {
+  const purchase = await resolvePurchase({
+    purchaseId: args.purchaseId,
+    grnNumber: args.currentGrnNumber,
+    invoiceID: args.invoiceID,
+    vehicleNumber: args.vehicleNumber,
+  });
+
+  if (purchase.purchaseTransportStatus === "COMPLETED") {
+    throw new Error("Completed purchases cannot be modified.");
+  }
+
+  const nextGrn = args.grnNumber.trim();
+  const currentGrn = purchase.grnNumber?.trim() || null;
+
+  return buildProposal({
+    action: "update_purchase_grn",
+    title: currentGrn ? `Replace GRN ${currentGrn} with ${nextGrn}` : `Set GRN ${nextGrn}`,
+    summary: `${purchase.Transporter?.name ?? "Purchase"}: GRN ${
+      currentGrn ?? "not set"
+    } → ${nextGrn}.`,
+    method: "PATCH",
+    endpoint: `/api/purchases/${purchase.id}/grn`,
+    targetId: purchase.id,
+    targetLabel: purchase.vehicleNumber || purchase.grnNumber || purchase.id,
+    payload: { grnNumber: nextGrn },
+    preview: {
+      sections: [
+        {
+          title: "Purchase",
+          rows: [
+            { label: "Transporter", value: purchase.Transporter?.name ?? "Unknown" },
+            { label: "Vehicle", value: purchase.vehicleNumber ?? "—" },
+            { label: "Status", value: purchase.purchaseTransportStatus },
+            { label: "Current GRN", value: currentGrn ?? "—" },
+            { label: "New GRN", value: nextGrn },
+          ],
+        },
+      ],
+      warnings: currentGrn
+        ? ["This replaces the existing GRN number for this purchase."]
+        : ["This sets the GRN number for this purchase."],
+    },
+    risk: "low",
+  });
+}
+
+export async function proposeUpdatePurchaseDatetimes(args: {
+  purchaseId?: string;
+  grnNumber?: string;
+  invoiceID?: string;
+  vehicleNumber?: string;
+  purchaseDate?: string;
+  markedArrivedAt?: string | null;
+  TargetUnloadingDate?: string | null;
+  markedUnloadedAt?: string | null;
+  VehicleExitedAt?: string | null;
+}): Promise<AiProposal> {
+  const purchase = await resolvePurchase({
+    purchaseId: args.purchaseId,
+    grnNumber: args.grnNumber,
+    invoiceID: args.invoiceID,
+    vehicleNumber: args.vehicleNumber,
+  });
+
+  if (purchase.purchaseTransportStatus === "COMPLETED") {
+    throw new Error("Completed purchases cannot be modified.");
+  }
+
+  const payload: Record<string, unknown> = {};
+  const rows: Array<{ label: string; value: string }> = [];
+  const fields: Array<{
+    key: "purchaseDate" | "markedArrivedAt" | "TargetUnloadingDate" | "markedUnloadedAt" | "VehicleExitedAt";
+    label: string;
+    input: string | null | undefined;
+    current: Date | null | undefined;
+    required?: boolean;
+  }> = [
+    { key: "purchaseDate", label: "Purchase date", input: args.purchaseDate, current: purchase.purchaseDate, required: true },
+    { key: "markedArrivedAt", label: "Vehicle arrived on", input: args.markedArrivedAt, current: purchase.markedArrivedAt },
+    { key: "TargetUnloadingDate", label: "Target unloading date", input: args.TargetUnloadingDate, current: purchase.TargetUnloadingDate },
+    { key: "markedUnloadedAt", label: "Unloading completed on", input: args.markedUnloadedAt, current: purchase.markedUnloadedAt },
+    { key: "VehicleExitedAt", label: "Vehicle exited on", input: args.VehicleExitedAt, current: purchase.VehicleExitedAt },
+  ];
+
+  for (const field of fields) {
+    const converted = datetimePayloadValue(
+      field.input,
+      field.required ? "purchaseDate" : "other"
+    );
+    if (field.input === undefined) continue;
+    if (!converted.ok) {
+      throw new Error(
+        `${field.label} is not a valid date${field.required ? " (it cannot be cleared)" : ""}.`
+      );
+    }
+    payload[field.key] = converted.value;
+    rows.push({
+      label: field.label,
+      value: `${purchaseDateLabel(field.current)} → ${
+        converted.value ? istDateString(new Date(converted.value)) : "cleared"
+      }`,
+    });
+  }
+
+  if (!Object.keys(payload).length) {
+    throw new Error("No datetime fields to update.");
+  }
+
+  return buildProposal({
+    action: "update_purchase_datetimes",
+    title: "Update purchase dates",
+    summary: `${purchase.Transporter?.name ?? "Purchase"}: update ${rows.length} date field(s).`,
+    method: "PATCH",
+    endpoint: `/api/purchases/${purchase.id}/manual-datetimes`,
+    targetId: purchase.id,
+    targetLabel: purchase.vehicleNumber || purchase.grnNumber || purchase.id,
+    payload,
+    preview: {
+      sections: [
+        {
+          title: "Purchase",
+          rows: [
+            { label: "Transporter", value: purchase.Transporter?.name ?? "Unknown" },
+            { label: "Vehicle", value: purchase.vehicleNumber ?? "—" },
+            { label: "Status", value: purchase.purchaseTransportStatus },
+          ],
+        },
+        {
+          title: "Date changes",
+          rows,
+        },
+      ],
+      warnings: [
+        "Manual dates override the timestamps recorded automatically by status changes.",
+        "Clearing a date leaves it empty; it is not recalculated.",
+      ],
+    },
+    risk: "medium",
   });
 }

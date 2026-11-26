@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BusinessOverviewArgsSchema = exports.ProposeAddPurchaseToStockArgsSchema = exports.ProposeUpdatePurchaseStatusArgsSchema = exports.ProposeCreatePurchaseArgsSchema = exports.ProposeVerifyOrderStockArgsSchema = exports.ProposeUpdateOrderStatusArgsSchema = exports.ProposeCreateOrderDraftArgsSchema = exports.LowStockArgsSchema = exports.SalesSummaryArgsSchema = exports.ListOrderStatusTypesArgsSchema = exports.SearchTransportersArgsSchema = exports.SearchCustomersArgsSchema = exports.SearchProductsArgsSchema = exports.GetPurchaseArgsSchema = exports.SearchPurchasesArgsSchema = exports.CustomerOrderHistoryArgsSchema = exports.GetOrderArgsSchema = exports.SearchOrdersArgsSchema = exports.AiInsightRequestSchema = exports.AiLineItemsRequestSchema = exports.AiInvoiceParseRequestSchema = exports.AiChatRequestSchema = exports.AiActionResultSchema = exports.AiClientMessageSchema = void 0;
+exports.BusinessOverviewArgsSchema = exports.ProposeUpdatePurchaseDatetimesArgsSchema = exports.ProposeUpdatePurchaseGrnArgsSchema = exports.ProposeAddPurchaseToStockArgsSchema = exports.ProposeUpdatePurchaseStatusArgsSchema = exports.ProposeCreatePurchaseArgsSchema = exports.ProposeVerifyOrderStockArgsSchema = exports.ProposeUpdateOrderStatusArgsSchema = exports.ProposeCreateOrderDraftArgsSchema = exports.LowStockArgsSchema = exports.SalesSummaryArgsSchema = exports.ListOrderStatusTypesArgsSchema = exports.SearchTransportersArgsSchema = exports.SearchCustomersArgsSchema = exports.SearchProductsArgsSchema = exports.ReconcilePurchaseArgsSchema = exports.PurchasePriceHistoryArgsSchema = exports.SupplierPurchaseHistoryArgsSchema = exports.PurchaseAnalyticsArgsSchema = exports.PurchaseWorkspaceArgsSchema = exports.GetPurchaseArgsSchema = exports.SearchPurchasesArgsSchema = exports.CustomerOrderHistoryArgsSchema = exports.GetOrderArgsSchema = exports.SearchOrdersArgsSchema = exports.AiInsightRequestSchema = exports.AiLineItemsRequestSchema = exports.AiInvoiceParseRequestSchema = exports.AiChatRequestSchema = exports.AiChatPurchaseRefSchema = exports.AiActionResultSchema = exports.AiClientMessageSchema = void 0;
 const zod_1 = require("zod");
 const PURCHASE_STATUS_VALUES = [
     "PENDING",
@@ -32,6 +32,13 @@ exports.AiActionResultSchema = zod_1.z.object({
     entityId: zod_1.z.string().max(120).optional(),
     message: zod_1.z.string().max(1000).optional(),
 });
+exports.AiChatPurchaseRefSchema = zod_1.z.object({
+    id: zod_1.z.string().min(1).max(40),
+    label: zod_1.z.string().max(200).optional(),
+    status: zod_1.z.string().max(40).optional(),
+    vehicleNumber: zod_1.z.string().max(80).nullable().optional(),
+    transporter: zod_1.z.string().max(200).nullable().optional(),
+});
 exports.AiChatRequestSchema = zod_1.z
     .object({
     messages: zod_1.z.array(exports.AiClientMessageSchema).min(1).max(30),
@@ -41,6 +48,15 @@ exports.AiChatRequestSchema = zod_1.z
         entityType: zod_1.z.string().max(40).optional(),
         entityId: zod_1.z.string().max(120).optional(),
         entityLabel: zod_1.z.string().max(200).optional(),
+        assistant: zod_1.z.literal("purchase").optional(),
+        filters: zod_1.z
+            .object({
+            unloadingFrom: zod_1.z.string().max(40).optional(),
+            unloadingTo: zod_1.z.string().max(40).optional(),
+        })
+            .optional(),
+        visiblePurchases: zod_1.z.array(exports.AiChatPurchaseRefSchema).max(80).optional(),
+        selectedPurchase: exports.AiChatPurchaseRefSchema.optional(),
     })
         .optional(),
     actionResult: exports.AiActionResultSchema.optional(),
@@ -134,6 +150,48 @@ exports.SearchPurchasesArgsSchema = zod_1.z.object({
 });
 exports.GetPurchaseArgsSchema = zod_1.z.object({
     purchaseId: zod_1.z.string().min(1).max(40),
+});
+const PurchaseStatusFilterSchema = zod_1.z.array(zod_1.z.enum(PURCHASE_STATUS_VALUES)).max(10).optional();
+exports.PurchaseWorkspaceArgsSchema = zod_1.z.object({
+    purchaseIds: zod_1.z.array(zod_1.z.string().max(40)).max(100).optional(),
+    statuses: PurchaseStatusFilterSchema,
+    unloadingFrom: zod_1.z.string().max(40).optional(),
+    unloadingTo: zod_1.z.string().max(40).optional(),
+    limit: LimitSchema,
+});
+exports.PurchaseAnalyticsArgsSchema = zod_1.z.object({
+    dateFrom: zod_1.z.string().max(40).optional(),
+    dateTo: zod_1.z.string().max(40).optional(),
+    transporterName: zod_1.z.string().max(200).optional(),
+    groupBy: zod_1.z.enum(["supplier", "month", "product", "status"]).optional(),
+    limit: LimitSchema,
+});
+exports.SupplierPurchaseHistoryArgsSchema = zod_1.z
+    .object({
+    transporterId: zod_1.z.string().max(40).optional(),
+    transporterQuery: zod_1.z.string().max(200).optional(),
+    dateFrom: zod_1.z.string().max(40).optional(),
+    dateTo: zod_1.z.string().max(40).optional(),
+    limit: LimitSchema,
+})
+    .refine((data) => Boolean(data.transporterId || data.transporterQuery), {
+    message: "Provide transporterId or transporterQuery (supplier name)",
+});
+exports.PurchasePriceHistoryArgsSchema = zod_1.z
+    .object({
+    productId: zod_1.z.string().max(40).optional(),
+    productCode: zod_1.z.string().max(120).optional(),
+    productName: zod_1.z.string().max(200).optional(),
+    limit: LimitSchema,
+})
+    .refine((data) => Boolean(data.productId || data.productCode || data.productName), {
+    message: "Provide productId, productCode, or productName",
+});
+exports.ReconcilePurchaseArgsSchema = zod_1.z.object({
+    purchaseId: zod_1.z.string().max(80).optional(),
+    grnNumber: zod_1.z.string().max(120).optional(),
+    invoiceID: zod_1.z.string().max(120).optional(),
+    vehicleNumber: zod_1.z.string().max(80).optional(),
 });
 exports.SearchProductsArgsSchema = zod_1.z.object({
     query: zod_1.z.string().max(200).optional(),
@@ -254,6 +312,38 @@ exports.ProposeAddPurchaseToStockArgsSchema = zod_1.z
     data.grnNumber ||
     data.invoiceID ||
     data.vehicleNumber), { message: "Provide purchaseId, grnNumber, invoiceID, or vehicleNumber" });
+exports.ProposeUpdatePurchaseGrnArgsSchema = zod_1.z
+    .object({
+    purchaseId: zod_1.z.string().max(80).optional(),
+    vehicleNumber: zod_1.z.string().max(80).optional(),
+    invoiceID: zod_1.z.string().max(120).optional(),
+    currentGrnNumber: zod_1.z.string().max(120).optional(),
+    grnNumber: zod_1.z.string().trim().min(1).max(120),
+})
+    .refine((data) => Boolean(data.purchaseId ||
+    data.vehicleNumber ||
+    data.invoiceID ||
+    data.currentGrnNumber), {
+    message: "Provide purchaseId, vehicleNumber, invoiceID, or currentGrnNumber to identify the purchase",
+});
+exports.ProposeUpdatePurchaseDatetimesArgsSchema = zod_1.z
+    .object({
+    ...PurchaseIdentityFields,
+    purchaseDate: zod_1.z.string().max(40).optional(),
+    markedArrivedAt: zod_1.z.string().max(40).nullable().optional(),
+    TargetUnloadingDate: zod_1.z.string().max(40).nullable().optional(),
+    markedUnloadedAt: zod_1.z.string().max(40).nullable().optional(),
+    VehicleExitedAt: zod_1.z.string().max(40).nullable().optional(),
+})
+    .refine((data) => Boolean(data.purchaseId ||
+    data.grnNumber ||
+    data.invoiceID ||
+    data.vehicleNumber), { message: "Provide purchaseId, grnNumber, invoiceID, or vehicleNumber" })
+    .refine((data) => data.purchaseDate !== undefined ||
+    data.markedArrivedAt !== undefined ||
+    data.TargetUnloadingDate !== undefined ||
+    data.markedUnloadedAt !== undefined ||
+    data.VehicleExitedAt !== undefined, { message: "Provide at least one datetime field to update" });
 exports.BusinessOverviewArgsSchema = zod_1.z.object({
     dateFrom: zod_1.z.string().max(40).optional(),
     dateTo: zod_1.z.string().max(40).optional(),

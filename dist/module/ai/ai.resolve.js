@@ -223,10 +223,23 @@ const purchaseSelect = {
     driverContact: true,
     grnNumber: true,
     purchaseTransportStatus: true,
+    purchaseDate: true,
+    markedArrivedAt: true,
+    TargetUnloadingDate: true,
+    markedUnloadingAt: true,
+    markedUnloadedAt: true,
+    VehicleExitedAt: true,
+    markedCompletedAt: true,
     stockAddedAt: true,
     Transporter: { select: { id: true, name: true } },
     PurchaseInvoice: {
-        include: { PurchaseInvoiceItem: true },
+        include: {
+            PurchaseInvoiceItem: {
+                include: {
+                    product: { select: { id: true, name: true, productCode: true } },
+                },
+            },
+        },
     },
     purchaseStockBatches: {
         include: { product: { select: { name: true, productCode: true } } },

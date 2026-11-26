@@ -1,9 +1,22 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DeepSeekError = void 0;
+exports.messageText = messageText;
 exports.getDeepSeekConfig = getDeepSeekConfig;
 exports.isDeepSeekConfigured = isDeepSeekConfigured;
 exports.chatCompletion = chatCompletion;
+/** Model responses are text; vision requests may have had array content. */
+function messageText(content) {
+    if (typeof content === "string")
+        return content;
+    if (Array.isArray(content)) {
+        return content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join("\n");
+    }
+    return "";
+}
 class DeepSeekError extends Error {
     constructor(code, message, status) {
         super(message);

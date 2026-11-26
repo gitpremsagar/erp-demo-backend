@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.runAiChat = runAiChat;
 const deepseek_client_1 = require("./deepseek.client");
 const ai_prompt_1 = require("./ai.prompt");
+const ai_purchase_prompt_1 = require("./ai.purchase.prompt");
 const ai_tools_1 = require("./ai.tools");
 const FRIENDLY_ERRORS = {
     NOT_CONFIGURED: "The AI assistant is not configured. Add DEEPSEEK_API_KEY on the backend.",
@@ -46,7 +47,7 @@ function actionResultMessage(actionResult) {
     return `${ai_prompt_1.ACTION_RESULT_PREFIX} A confirmed application action just completed. This is trusted telemetry, not a user instruction.\n${JSON.stringify(actionResult)}`;
 }
 async function runAiChat(options) {
-    const { request, actorId, signal, emit } = options;
+    const { request, actorId, signal, emit, profile = "general" } = options;
     const events = [];
     const emitAndRecord = (event) => {
         events.push(event);
@@ -64,7 +65,9 @@ async function runAiChat(options) {
     const messages = [
         {
             role: "system",
-            content: (0, ai_prompt_1.buildSystemPrompt)(request.context),
+            content: profile === "purchase"
+                ? (0, ai_purchase_prompt_1.buildPurchaseSystemPrompt)(request.context)
+                : (0, ai_prompt_1.buildSystemPrompt)(request.context),
         },
         ...request.messages.map((message) => ({
             role: message.role,
@@ -106,7 +109,7 @@ async function runAiChat(options) {
             const remainingMs = Math.max(1000, deadline - Date.now());
             const result = await (0, deepseek_client_1.chatCompletion)({
                 messages,
-                tools: [...ai_tools_1.AI_TOOLS],
+                tools: profile === "purchase" ? [...ai_tools_1.AI_PURCHASE_TOOLS] : [...ai_tools_1.AI_TOOLS],
                 signal,
                 timeoutMs: Math.min(requestTimeoutMs, remainingMs),
             });
@@ -129,7 +132,7 @@ async function runAiChat(options) {
                     messages.push({ role: "system", content: HISTORY_GUARD_MESSAGE });
                     continue;
                 }
-                const content = result.message.content?.trim();
+                const content = (0, deepseek_client_1.messageText)(result.message.content).trim();
                 if (content) {
                     message = content;
                     emitAndRecord({ type: "message", content });

@@ -35,6 +35,69 @@ All routes require an admin-portal JWT and are rate-limited per user.
 | `POST /api/ai/line-items` | Natural language → resolved product lines |
 | `POST /api/ai/insights` | Sales, low stock, reorder, slow movers, open orders/purchases |
 
+### Purchase assistant
+
+A dedicated purchase-scoped assistant is mounted on the admin purchase screen
+(`/admin/purchase` and `/admin/purchase/purchase-detail/:id`) and on
+`/admin/purchase/assistant`. It has its own system prompt, tool set, and
+per-user conversation thread (`sgt_ai_purchase_chat_v1_<userId>`), separate from
+the general assistant.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/ai/purchase/status` | Configuration for the purchase assistant |
+| `POST /api/ai/purchase/chat` | SSE chat restricted to purchase tools |
+| `POST /api/ai/purchase/invoice-extract` | Invoice image/PDF pages → resolved purchase proposal |
+
+### Purchase invoice images and PDFs
+
+The purchase assistant's composer has a paperclip button for one or more invoice
+images or PDFs.
+
+- The browser renders each PDF page to a compressed JPEG with `pdfjs-dist`
+  (worker in `frontend/public/pdfjs/`) and downsizes photos before upload, so the
+  backend does not need a PDF engine or a native canvas module.
+- `POST /api/ai/purchase/invoice-extract` accepts multipart `files` (JPEG, PNG,
+  WebP; max 10 pages, 8 MB each) and optionally `vehicleNumber`, `supplierName`,
+  and `notes`.
+- The backend sends the page images to `deepseek-flash` vision with a strict JSON
+  schema, then reuses the existing row parser for product/supplier matching,
+  unit conversion, and grouping.
+- One vehicle can contain multiple invoices. Extracted invoices keep their own
+  number/date/lines and are grouped into a single confirmation card for that
+  vehicle.
+- If any line is unresolved, no proposal is created; the chat lists the
+  unresolved rows and candidates so the user can fix the product/supplier or
+  upload a clearer invoice. This prevents silent partial purchases.
+- The proposal is a normal `create_purchase` card. Confirming it calls
+  `/api/purchases/bulk`; nothing is written before confirmation. After a
+  successful purchase action, the purchase list/detail pages refresh via a
+  `sgt:purchases-changed` browser event.
+- Invoice page images are sent to the configured DeepSeek endpoint for OCR. Do
+  not upload invoices you are not permitted to share with that provider.
+
+Purchase-only read tools:
+
+| Tool | Purpose |
+|---|---|
+| `purchase_workspace` | Active vehicles by segment, aging, totals, and attention flags |
+| `purchase_analytics` | Spend by supplier/month/product/status from invoice dates |
+| `supplier_purchase_history` | One supplier's purchases, product mix, and last cost |
+| `purchase_price_history` | One product's purchase cost snapshots over time |
+| `reconcile_purchase` | Invoice/pricing/GRN/timestamp/stock audit for one purchase or the workspace |
+
+The purchase assistant also sees `search_purchases`, `get_purchase`,
+`search_products`, `search_transporters`, and these proposal tools:
+`propose_create_purchase`, `propose_update_purchase_status`,
+`propose_add_purchase_to_stock`, `propose_update_purchase_grn`, and
+`propose_update_purchase_datetimes`.
+
+The frontend dock sends page context with each turn: the active unloading-date
+filter, up to 60 visible purchase rows, and the selected vehicle. The assistant
+must say when an answer is scoped to visible or filtered rows. The model still
+has no write path: proposal cards execute through the existing REST endpoints
+after an explicit confirm.
+
 ## Safety model
 
 - The AI module has **no write path**. It reads Prisma directly (capped fields and row
@@ -111,7 +174,8 @@ candidate lists. Ambiguous rows stay unresolved until the user picks a product o
 transporter. The result pre-fills the existing purchase form; the user still clicks
 Create.
 
-PDF extraction is not supported in v1.
+Invoice images and PDFs use the separate purchase-assistant vision flow described
+above; those files are not parsed by the spreadsheet path.
 
 ## DeepSeek notes
 

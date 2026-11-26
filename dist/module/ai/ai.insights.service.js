@@ -88,7 +88,7 @@ async function buildNarrative(kind, facts) {
             maxTokens: 400,
             timeoutMs: 20000,
         });
-        return result.message.content?.trim() || null;
+        return (0, deepseek_client_1.messageText)(result.message.content).trim() || null;
     }
     catch {
         return null;

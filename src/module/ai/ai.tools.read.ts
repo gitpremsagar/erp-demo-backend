@@ -6,9 +6,11 @@ import {
   type ReportOrderRow,
 } from "../../lib/orderSaleAmount";
 import { resolveOrderItemSnapshotRates } from "../../lib/orderItemPriceSnapshot";
+import { computePurchaseInvoiceAmountFromItems, resolvePurchaseItemSnapshotRates } from "../../lib/purchaseItemPriceSnapshot";
 import { isPurchasePricingComplete } from "../purchase/purchasePricing";
 import { getCatalog } from "./ai.catalogCache";
 import { matchCandidate } from "./ai.matching";
+import { resolveProducts, resolvePurchase, resolveTransporter } from "./ai.resolve";
 import {
   formatInr,
   formatNumber,
@@ -27,12 +29,17 @@ import type {
   GetOrderArgsSchema,
   GetPurchaseArgsSchema,
   LowStockArgsSchema,
+  PurchaseAnalyticsArgsSchema,
+  PurchasePriceHistoryArgsSchema,
+  PurchaseWorkspaceArgsSchema,
+  ReconcilePurchaseArgsSchema,
   SalesSummaryArgsSchema,
   SearchCustomersArgsSchema,
   SearchOrdersArgsSchema,
   SearchProductsArgsSchema,
   SearchPurchasesArgsSchema,
   SearchTransportersArgsSchema,
+  SupplierPurchaseHistoryArgsSchema,
 } from "./ai.schema";
 
 type SearchOrdersArgs = z.infer<typeof SearchOrdersArgsSchema>;
@@ -40,6 +47,11 @@ type GetOrderArgs = z.infer<typeof GetOrderArgsSchema>;
 type CustomerOrderHistoryArgs = z.infer<typeof CustomerOrderHistoryArgsSchema>;
 type SearchPurchasesArgs = z.infer<typeof SearchPurchasesArgsSchema>;
 type GetPurchaseArgs = z.infer<typeof GetPurchaseArgsSchema>;
+type PurchaseWorkspaceArgs = z.infer<typeof PurchaseWorkspaceArgsSchema>;
+type PurchaseAnalyticsArgs = z.infer<typeof PurchaseAnalyticsArgsSchema>;
+type SupplierPurchaseHistoryArgs = z.infer<typeof SupplierPurchaseHistoryArgsSchema>;
+type PurchasePriceHistoryArgs = z.infer<typeof PurchasePriceHistoryArgsSchema>;
+type ReconcilePurchaseArgs = z.infer<typeof ReconcilePurchaseArgsSchema>;
 type SearchProductsArgs = z.infer<typeof SearchProductsArgsSchema>;
 type SearchCustomersArgs = z.infer<typeof SearchCustomersArgsSchema>;
 type SearchTransportersArgs = z.infer<typeof SearchTransportersArgsSchema>;
@@ -1920,4 +1932,1005 @@ export function formatQuantity(value: number): string {
 
 export function productLookup(products: Array<{ id: string; name: string; productCode: string }>) {
   return compactProductMap(products);
+}
+
+// ============================================================================
+// Purchase workspace tools
+// ============================================================================
+
+type PurchaseSegment = "loading" | "in_transit" | "unloaded" | "other";
+
+const PURCHASE_SEGMENTS: Record<string, PurchaseSegment> = {
+  PENDING: "loading",
+  LOADING: "loading",
+  LOADED: "loading",
+  IN_TRANSIT: "in_transit",
+  ARRIVED: "in_transit",
+  UNLOADING: "in_transit",
+  UNLOADED: "unloaded",
+  EXITED: "unloaded",
+};
+
+function purchaseSegment(status: string): PurchaseSegment {
+  return PURCHASE_SEGMENTS[status] ?? "other";
+}
+
+function wholeDaysSince(date: Date | null | undefined, now = new Date()): number | null {
+  if (!date) return null;
+  const millis = now.getTime() - date.getTime();
+  if (!Number.isFinite(millis)) return null;
+  return Math.max(0, Math.floor(millis / 86_400_000));
+}
+
+function purchaseWorkspaceAttention(input: {
+  status: string;
+  grnNumber: string | null;
+  pricingComplete: boolean;
+  stockAdded: boolean;
+  TargetUnloadingDate: Date | null;
+  markedArrivedAt: Date | null;
+  markedUnloadedAt: Date | null;
+  purchaseDate: Date;
+}): string[] {
+  const attention: string[] = [];
+  const status = input.status;
+  const arrived = ["ARRIVED", "UNLOADING", "UNLOADED", "EXITED"].includes(status);
+  if (arrived && !input.grnNumber) attention.push("missing_grn");
+  if (!input.pricingComplete) attention.push("pricing_incomplete");
+  if (["UNLOADED", "EXITED"].includes(status) && !input.stockAdded) {
+    attention.push("stock_not_added");
+  }
+  if (!input.TargetUnloadingDate) attention.push("missing_target_unloading");
+  if (status === "IN_TRANSIT" && (wholeDaysSince(input.purchaseDate) ?? 0) > 7) {
+    attention.push("long_transit");
+  }
+  if (
+    input.markedArrivedAt &&
+    !input.markedUnloadedAt &&
+    (wholeDaysSince(input.markedArrivedAt) ?? 0) >= 2
+  ) {
+    attention.push("awaiting_unloading");
+  }
+  return attention;
+}
+
+const workspaceInvoiceSelect = {
+  id: true,
+  invoiceID: true,
+  invoiceDate: true,
+  invoiceAmount: true,
+  PurchaseInvoiceItem: {
+    select: {
+      productId: true,
+      quantity: true,
+      mrp: true,
+      gstPercentage: true,
+      packetsPerCarton: true,
+      costPricePerPacket: true,
+      costPricePerCarton: true,
+      product: { select: { id: true, name: true, productCode: true } },
+    },
+  },
+} as const;
+
+export async function purchaseWorkspace(args: PurchaseWorkspaceArgs) {
+  const limit = toPositiveInt(args.limit, 50, 100);
+  const now = new Date();
+  const where: Prisma.PurchaseWhereInput = {
+    purchaseTransportStatus: { not: "COMPLETED" },
+  };
+
+  if (args.statuses?.length) {
+    const activeStatuses = args.statuses.filter((status) => status !== "COMPLETED");
+    where.purchaseTransportStatus = activeStatuses.length
+      ? { in: activeStatuses }
+      : { not: "COMPLETED" };
+  }
+  if (args.purchaseIds?.length) {
+    where.id = { in: args.purchaseIds };
+  }
+
+  const hasUnloadingFilter = Boolean(args.unloadingFrom || args.unloadingTo);
+  let unloadingRange: { from: string; to: string } | null = null;
+  if (hasUnloadingFilter) {
+    const range = resolveDateRange(args.unloadingFrom, args.unloadingTo, 30, 366);
+    unloadingRange = { from: range.from, to: range.to };
+    where.TargetUnloadingDate = { gte: range.fromDate, lte: range.toDate };
+  }
+
+  const purchases = await prisma.purchase.findMany({
+    where,
+    take: limit + 1,
+    orderBy: { createdAt: "desc" },
+    include: {
+      Transporter: { select: { id: true, name: true } },
+      PurchaseInvoice: { select: workspaceInvoiceSelect },
+      purchaseStockBatches: { select: { id: true, stockQuantity: true } },
+      stockBatches: { select: { id: true } },
+    },
+  });
+
+  const truncated = purchases.length > limit;
+  const rows = purchases.slice(0, limit).map((purchase) => {
+    const items = purchase.PurchaseInvoice.flatMap(
+      (invoice) => invoice.PurchaseInvoiceItem
+    );
+    const cartons = items.reduce((sum, item) => sum + (item.quantity ?? 0), 0);
+    const invoiceValue = purchase.PurchaseInvoice.reduce(
+      (sum, invoice) =>
+        sum +
+        (invoice.invoiceAmount ??
+          computePurchaseInvoiceAmountFromItems(invoice.PurchaseInvoiceItem)),
+      0
+    );
+    const pricingComplete = isPurchasePricingComplete(purchase.PurchaseInvoice);
+    const stockAdded = purchase.stockBatches.length > 0;
+    const attention = purchaseWorkspaceAttention({
+      status: purchase.purchaseTransportStatus,
+      grnNumber: purchase.grnNumber,
+      pricingComplete,
+      stockAdded,
+      TargetUnloadingDate: purchase.TargetUnloadingDate,
+      markedArrivedAt: purchase.markedArrivedAt,
+      markedUnloadedAt: purchase.markedUnloadedAt,
+      purchaseDate: purchase.purchaseDate,
+    });
+
+    return {
+      id: purchase.id,
+      label:
+        purchase.vehicleNumber ||
+        purchase.grnNumber ||
+        purchase.PurchaseInvoice.map((invoice) => invoice.invoiceID)
+          .filter(Boolean)
+          .slice(0, 2)
+          .join(", ") ||
+        purchase.id,
+      status: purchase.purchaseTransportStatus,
+      segment: purchaseSegment(purchase.purchaseTransportStatus),
+      transporter: purchase.Transporter?.name ?? "Unknown",
+      vehicleNumber: purchase.vehicleNumber,
+      grnNumber: purchase.grnNumber,
+      purchaseDate: istDateString(purchase.purchaseDate),
+      ageDays: wholeDaysSince(purchase.purchaseDate, now),
+      targetUnloadingDate: purchase.TargetUnloadingDate
+        ? istDateString(purchase.TargetUnloadingDate)
+        : null,
+      markedArrivedAt: purchase.markedArrivedAt
+        ? istDateString(purchase.markedArrivedAt)
+        : null,
+      markedUnloadedAt: purchase.markedUnloadedAt
+        ? istDateString(purchase.markedUnloadedAt)
+        : null,
+      vehicleExitedAt: purchase.VehicleExitedAt
+        ? istDateString(purchase.VehicleExitedAt)
+        : null,
+      daysSinceArrival: wholeDaysSince(purchase.markedArrivedAt, now),
+      invoiceCount: purchase.PurchaseInvoice.length,
+      invoiceIDs: purchase.PurchaseInvoice.map((invoice) => invoice.invoiceID)
+        .filter(Boolean)
+        .slice(0, 5),
+      lineCount: items.length,
+      cartons,
+      invoiceValue,
+      invoiceValueFormatted: formatInr(invoiceValue),
+      plannedBatches: purchase.purchaseStockBatches.length,
+      plannedCartons: purchase.purchaseStockBatches.reduce(
+        (sum, batch) => sum + (batch.stockQuantity ?? 0),
+        0
+      ),
+      stockAdded,
+      pricingComplete,
+      attention,
+    };
+  });
+
+  const counts = {
+    total: rows.length,
+    loading: rows.filter((row) => row.segment === "loading").length,
+    inTransit: rows.filter((row) => row.segment === "in_transit").length,
+    unloaded: rows.filter((row) => row.segment === "unloaded").length,
+  };
+  const attentionCounts: Record<string, number> = {};
+  for (const row of rows) {
+    for (const code of row.attention) {
+      attentionCounts[code] = (attentionCounts[code] ?? 0) + 1;
+    }
+  }
+
+  const attentionLabels: Record<string, string> = {
+    missing_grn: "Missing GRN",
+    pricing_incomplete: "Pricing incomplete",
+    stock_not_added: "Stock not added",
+    missing_target_unloading: "Missing target unloading date",
+    long_transit: "Long transit (IN_TRANSIT over 7 days)",
+    awaiting_unloading: "Arrived but not unloaded (2+ days)",
+  };
+
+  return {
+    scope: "active purchases (status not COMPLETED)",
+    filters: {
+      unloadingFrom: unloadingRange?.from ?? null,
+      unloadingTo: unloadingRange?.to ?? null,
+      statuses: args.statuses ?? null,
+      purchaseIds: args.purchaseIds?.length ? args.purchaseIds.length : null,
+    },
+    counts,
+    totals: {
+      cartons: rows.reduce((sum, row) => sum + row.cartons, 0),
+      invoiceValue: rows.reduce((sum, row) => sum + row.invoiceValue, 0),
+      invoiceValueFormatted: formatInr(
+        rows.reduce((sum, row) => sum + row.invoiceValue, 0)
+      ),
+      vehiclesWithAttention: rows.filter((row) => row.attention.length > 0).length,
+      stockAdded: rows.filter((row) => row.stockAdded).length,
+      stockNotAdded: rows.filter((row) => !row.stockAdded).length,
+      pricingIncomplete: rows.filter((row) => !row.pricingComplete).length,
+      missingGrn: rows.filter((row) => !row.grnNumber).length,
+      missingTargetUnloading: rows.filter((row) => !row.targetUnloadingDate).length,
+    },
+    attentionCounts,
+    attentionSummary: Object.entries(attentionCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([code, count]) => ({
+        code,
+        label: attentionLabels[code] ?? code,
+        count,
+      })),
+    truncated,
+    purchases: rows,
+    guidance:
+      "Use this for what needs attention, vehicle status, aging, GRN gaps, pricing gaps, and stock-not-added checks. If the user asks about a single vehicle, use get_purchase for line-level detail. Values use invoice amounts where present, otherwise computed snapshots.",
+    notes: [
+      "Only active purchases are included; COMPLETED purchases are excluded.",
+      "invoiceValue is the invoice amount when set, otherwise the computed line amount with GST.",
+    ],
+  };
+}
+
+type AnalyticsBucket = {
+  key: string;
+  invoiceIds: Set<string>;
+  purchaseIds: Set<string>;
+  amount: number;
+  cartons: number;
+  lines: number;
+};
+
+function addToBucket(
+  bucketMap: Map<string, AnalyticsBucket>,
+  key: string,
+  amount: number,
+  cartons: number,
+  lines: number,
+  invoiceId: string,
+  purchaseId: string
+) {
+  const existing = bucketMap.get(key) ?? {
+    key,
+    invoiceIds: new Set<string>(),
+    purchaseIds: new Set<string>(),
+    amount: 0,
+    cartons: 0,
+    lines: 0,
+  };
+  existing.invoiceIds.add(invoiceId);
+  existing.purchaseIds.add(purchaseId);
+  existing.amount += amount;
+  existing.cartons += cartons;
+  existing.lines += lines;
+  bucketMap.set(key, existing);
+}
+
+function bucketRows(bucketMap: Map<string, AnalyticsBucket>, limit: number, totalAmount: number) {
+  return [...bucketMap.values()]
+    .sort((a, b) => b.amount - a.amount)
+    .slice(0, limit)
+    .map((bucket) => ({
+      key: bucket.key,
+      invoiceCount: bucket.invoiceIds.size,
+      purchaseCount: bucket.purchaseIds.size,
+      lineCount: bucket.lines,
+      amount: Math.round(bucket.amount * 100) / 100,
+      amountFormatted: formatInr(bucket.amount),
+      cartons: bucket.cartons,
+      sharePct:
+        totalAmount > 0
+          ? Math.round((bucket.amount / totalAmount) * 1000) / 10
+          : 0,
+    }));
+}
+
+export async function purchaseAnalytics(args: PurchaseAnalyticsArgs) {
+  const limit = toPositiveInt(args.limit, 12, 25);
+  const range = resolveDateRange(args.dateFrom, args.dateTo, 30, 366);
+  const groupBy = args.groupBy ?? "supplier";
+
+  const where: Prisma.PurchaseInvoiceWhereInput = {
+    invoiceDate: { gte: range.fromDate, lte: range.toDate },
+  };
+  if (args.transporterName) {
+    where.purchase = {
+      is: {
+        Transporter: {
+          is: { name: { contains: args.transporterName, mode: "insensitive" } },
+        },
+      },
+    };
+  }
+
+  const invoices = await prisma.purchaseInvoice.findMany({
+    where,
+    take: 2001,
+    orderBy: { invoiceDate: "desc" },
+    select: {
+      id: true,
+      invoiceID: true,
+      invoiceDate: true,
+      invoiceAmount: true,
+      purchaseId: true,
+      purchase: {
+        select: {
+          id: true,
+          purchaseTransportStatus: true,
+          vehicleNumber: true,
+          grnNumber: true,
+          Transporter: { select: { name: true } },
+        },
+      },
+      PurchaseInvoiceItem: {
+        select: {
+          productId: true,
+          quantity: true,
+          mrp: true,
+          gstPercentage: true,
+          packetsPerCarton: true,
+          costPricePerPacket: true,
+          costPricePerCarton: true,
+          product: { select: { id: true, name: true, productCode: true } },
+        },
+      },
+    },
+  });
+
+  const truncated = invoices.length > 2000;
+  const rows = invoices.slice(0, 2000);
+
+  const supplierBuckets = new Map<string, AnalyticsBucket>();
+  const monthBuckets = new Map<string, AnalyticsBucket>();
+  const productBuckets = new Map<string, AnalyticsBucket>();
+  const statusBuckets = new Map<string, AnalyticsBucket>();
+  const purchaseIds = new Set<string>();
+  let totalAmount = 0;
+  let totalCartons = 0;
+  let totalLines = 0;
+  let invoiceAmountTotal = 0;
+  let computedAmountTotal = 0;
+
+  for (const invoice of rows) {
+    const purchaseId = invoice.purchaseId;
+    const supplier = invoice.purchase?.Transporter?.name ?? "Unknown supplier";
+    const status = invoice.purchase?.purchaseTransportStatus ?? "UNKNOWN";
+    const month = invoice.invoiceDate
+      ? istDateString(invoice.invoiceDate).slice(0, 7)
+      : "unknown";
+    const computedAmount = computePurchaseInvoiceAmountFromItems(
+      invoice.PurchaseInvoiceItem
+    );
+    const amount = invoice.invoiceAmount ?? computedAmount;
+    const cartons = invoice.PurchaseInvoiceItem.reduce(
+      (sum, item) => sum + (item.quantity ?? 0),
+      0
+    );
+    const lineCount = invoice.PurchaseInvoiceItem.length;
+
+    purchaseIds.add(purchaseId);
+    totalAmount += amount;
+    totalCartons += cartons;
+    totalLines += lineCount;
+    if (invoice.invoiceAmount !== null && invoice.invoiceAmount !== undefined) {
+      invoiceAmountTotal += invoice.invoiceAmount;
+    }
+    computedAmountTotal += computedAmount;
+
+    addToBucket(supplierBuckets, supplier, amount, cartons, lineCount, invoice.id, purchaseId);
+    addToBucket(monthBuckets, month, amount, cartons, lineCount, invoice.id, purchaseId);
+    addToBucket(statusBuckets, status, amount, cartons, lineCount, invoice.id, purchaseId);
+
+    for (const item of invoice.PurchaseInvoiceItem) {
+      const lineAmount =
+        item.quantity *
+        resolvePurchaseItemSnapshotRates(item).carton *
+        (1 + (item.gstPercentage ?? 0) / 100);
+      const key = item.product?.name ?? item.productId;
+      addToBucket(
+        productBuckets,
+        key,
+        lineAmount,
+        item.quantity ?? 0,
+        1,
+        invoice.id,
+        purchaseId
+      );
+    }
+  }
+
+  const groupBuckets =
+    groupBy === "month"
+      ? monthBuckets
+      : groupBy === "product"
+        ? productBuckets
+        : groupBy === "status"
+          ? statusBuckets
+          : supplierBuckets;
+
+  const supplierRows = bucketRows(supplierBuckets, limit, totalAmount);
+  const productRows = bucketRows(productBuckets, limit, totalAmount);
+  const monthlyRows = [...monthBuckets.values()]
+    .sort((a, b) => b.key.localeCompare(a.key))
+    .slice(0, 18)
+    .map((bucket) => ({
+      month: bucket.key,
+      invoiceCount: bucket.invoiceIds.size,
+      amount: Math.round(bucket.amount * 100) / 100,
+      amountFormatted: formatInr(bucket.amount),
+      cartons: bucket.cartons,
+    }));
+
+  return {
+    range: { from: range.from, to: range.to },
+    groupBy,
+    supplierFilter: args.transporterName ?? null,
+    invoiceCount: rows.length,
+    purchaseCount: purchaseIds.size,
+    truncated,
+    totals: {
+      amount: Math.round(totalAmount * 100) / 100,
+      amountFormatted: formatInr(totalAmount),
+      cartons: totalCartons,
+      lines: totalLines,
+      averageInvoiceAmount:
+        rows.length > 0 ? Math.round((totalAmount / rows.length) * 100) / 100 : 0,
+      invoiceAmountTotal: Math.round(invoiceAmountTotal * 100) / 100,
+      computedAmountTotal: Math.round(computedAmountTotal * 100) / 100,
+    },
+    groups: bucketRows(groupBuckets, limit, totalAmount),
+    topSuppliers: supplierRows,
+    topProducts: productRows,
+    monthly: monthlyRows,
+    statusBreakdown: bucketRows(statusBuckets, 20, totalAmount),
+    notes: [
+      "Date range is based on supplier invoice date; invoices without an invoice date are excluded.",
+      "The maximum scan window is 366 days; the requested dates are clamped to that window.",
+      truncated
+        ? "Only the most recent 2,000 invoices in the range were scanned; narrow the date range for exact totals."
+        : null,
+      "amount uses invoiceAmount when set, otherwise the snapshot line amount with GST.",
+      "Status breakdown is the current status of each purchase, not the status at invoice time.",
+    ].filter(Boolean),
+  };
+}
+
+export async function supplierPurchaseHistory(args: SupplierPurchaseHistoryArgs) {
+  const limit = toPositiveInt(args.limit, 10, 25);
+  const transporter = await resolveTransporter({
+    transporterId: args.transporterId,
+    transporterQuery: args.transporterQuery,
+  });
+  const hasDateFilter = Boolean(args.dateFrom || args.dateTo);
+  const range = hasDateFilter
+    ? resolveDateRange(args.dateFrom, args.dateTo, 90, 366)
+    : null;
+
+  const purchases = await prisma.purchase.findMany({
+    where: {
+      transporterId: transporter.id,
+      ...(range
+        ? {
+            PurchaseInvoice: {
+              some: { invoiceDate: { gte: range.fromDate, lte: range.toDate } },
+            },
+          }
+        : {}),
+    },
+    take: limit + 1,
+    orderBy: { purchaseDate: "desc" },
+    include: {
+      Transporter: { select: { id: true, name: true } },
+      PurchaseInvoice: { select: workspaceInvoiceSelect },
+      stockBatches: { select: { id: true } },
+      purchaseStockBatches: { select: { id: true, stockQuantity: true } },
+    },
+  });
+
+  const truncated = purchases.length > limit;
+  const rows = purchases.slice(0, limit);
+  const productMix = new Map<
+    string,
+    {
+      name: string;
+      code: string;
+      cartons: number;
+      amount: number;
+      purchases: Set<string>;
+      lastCostPerCarton: number;
+      lastDate: string | null;
+    }
+  >();
+
+  let totalCartons = 0;
+  let totalAmount = 0;
+  let invoiceCount = 0;
+  const purchaseRows = rows.map((purchase) => {
+    const items = purchase.PurchaseInvoice.flatMap(
+      (invoice) => invoice.PurchaseInvoiceItem
+    );
+    const cartons = items.reduce((sum, item) => sum + (item.quantity ?? 0), 0);
+    const amount = purchase.PurchaseInvoice.reduce(
+      (sum, invoice) =>
+        sum +
+        (invoice.invoiceAmount ??
+          computePurchaseInvoiceAmountFromItems(invoice.PurchaseInvoiceItem)),
+      0
+    );
+    const pricingComplete = isPurchasePricingComplete(purchase.PurchaseInvoice);
+    const stockAdded = purchase.stockBatches.length > 0;
+    totalCartons += cartons;
+    totalAmount += amount;
+    invoiceCount += purchase.PurchaseInvoice.length;
+
+    for (const invoice of purchase.PurchaseInvoice) {
+      for (const item of invoice.PurchaseInvoiceItem) {
+        if (!item.product) continue;
+        const key = item.product.id;
+        const rates = resolvePurchaseItemSnapshotRates(item);
+        const lineAmount =
+          (item.quantity ?? 0) * rates.carton * (1 + (item.gstPercentage ?? 0) / 100);
+        const existing = productMix.get(key) ?? {
+          name: item.product.name,
+          code: item.product.productCode,
+          cartons: 0,
+          amount: 0,
+          purchases: new Set<string>(),
+          lastCostPerCarton: 0,
+          lastDate: null,
+        };
+        existing.cartons += item.quantity ?? 0;
+        existing.amount += lineAmount;
+        existing.purchases.add(purchase.id);
+        existing.lastCostPerCarton = rates.carton;
+        existing.lastDate = invoice.invoiceDate
+          ? istDateString(invoice.invoiceDate)
+          : existing.lastDate;
+        productMix.set(key, existing);
+      }
+    }
+
+    return {
+      id: purchase.id,
+      label: purchase.vehicleNumber || purchase.grnNumber || purchase.id,
+      status: purchase.purchaseTransportStatus,
+      vehicleNumber: purchase.vehicleNumber,
+      grnNumber: purchase.grnNumber,
+      purchaseDate: istDateString(purchase.purchaseDate),
+      targetUnloadingDate: purchase.TargetUnloadingDate
+        ? istDateString(purchase.TargetUnloadingDate)
+        : null,
+      markedArrivedAt: purchase.markedArrivedAt
+        ? istDateString(purchase.markedArrivedAt)
+        : null,
+      markedUnloadedAt: purchase.markedUnloadedAt
+        ? istDateString(purchase.markedUnloadedAt)
+        : null,
+      invoiceIDs: purchase.PurchaseInvoice.map((invoice) => invoice.invoiceID)
+        .filter(Boolean)
+        .slice(0, 5),
+      invoiceCount: purchase.PurchaseInvoice.length,
+      lineCount: items.length,
+      cartons,
+      amount,
+      amountFormatted: formatInr(amount),
+      pricingComplete,
+      stockAdded,
+      attention: purchaseWorkspaceAttention({
+        status: purchase.purchaseTransportStatus,
+        grnNumber: purchase.grnNumber,
+        pricingComplete,
+        stockAdded,
+        TargetUnloadingDate: purchase.TargetUnloadingDate,
+        markedArrivedAt: purchase.markedArrivedAt,
+        markedUnloadedAt: purchase.markedUnloadedAt,
+        purchaseDate: purchase.purchaseDate,
+      }),
+    };
+  });
+
+  return {
+    supplier: { id: transporter.id, name: transporter.name },
+    range: range ? { from: range.from, to: range.to } : null,
+    purchaseCount: rows.length,
+    truncated,
+    invoiceCount,
+    totals: {
+      cartons: totalCartons,
+      amount: Math.round(totalAmount * 100) / 100,
+      amountFormatted: formatInr(totalAmount),
+      averagePurchaseAmount:
+        rows.length > 0 ? Math.round((totalAmount / rows.length) * 100) / 100 : 0,
+      lastPurchaseDate: purchaseRows[0]?.purchaseDate ?? null,
+    },
+    purchases: purchaseRows,
+    productMix: [...productMix.values()]
+      .sort((a, b) => b.cartons - a.cartons)
+      .slice(0, 15)
+      .map((entry) => ({
+        name: entry.name,
+        code: entry.code,
+        cartons: entry.cartons,
+        amount: Math.round(entry.amount * 100) / 100,
+        amountFormatted: formatInr(entry.amount),
+        purchaseCount: entry.purchases.size,
+        lastCostPerCarton: entry.lastCostPerCarton,
+        lastInvoiceDate: entry.lastDate,
+      })),
+    notes: [
+      range
+        ? `Date range is based on supplier invoice date (${range.from} to ${range.to}); purchases without an invoice in the range are excluded.`
+        : "No date filter was supplied, so the most recent purchases for this supplier are shown.",
+      "avg cost is not weighted by quantity; lastCostPerCarton is the latest snapshot in the selected purchases.",
+      "COMPLETED purchases are included when they are among the selected purchases.",
+    ],
+  };
+}
+
+export async function purchasePriceHistory(args: PurchasePriceHistoryArgs) {
+  const limit = toPositiveInt(args.limit, 15, 30);
+  const catalog = await getCatalog();
+  const product = resolveProducts(
+    [
+      {
+        productId: args.productId,
+        productCode: args.productCode,
+        productName: args.productName,
+        quantity: 1,
+      },
+    ],
+    catalog.products
+  )[0];
+
+  const items = await prisma.purchaseInvoiceItem.findMany({
+    where: { productId: product.id },
+    take: limit + 1,
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      quantity: true,
+      mrp: true,
+      gstPercentage: true,
+      packetsPerCarton: true,
+      costPricePerPacket: true,
+      costPricePerCarton: true,
+      createdAt: true,
+      PurchaseInvoice: {
+        select: {
+          id: true,
+          invoiceID: true,
+          invoiceDate: true,
+          purchase: {
+            select: {
+              id: true,
+              vehicleNumber: true,
+              grnNumber: true,
+              purchaseTransportStatus: true,
+              Transporter: { select: { name: true } },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  const truncated = items.length > limit;
+  const lines = items
+    .slice(0, limit)
+    .map((item) => {
+      const rates = resolvePurchaseItemSnapshotRates(item);
+      return {
+        invoiceDate: item.PurchaseInvoice?.invoiceDate
+          ? istDateString(item.PurchaseInvoice.invoiceDate)
+          : null,
+        invoiceID: item.PurchaseInvoice?.invoiceID ?? null,
+        purchaseId: item.PurchaseInvoice?.purchase?.id ?? null,
+        transporter: item.PurchaseInvoice?.purchase?.Transporter?.name ?? null,
+        vehicleNumber: item.PurchaseInvoice?.purchase?.vehicleNumber ?? null,
+        grnNumber: item.PurchaseInvoice?.purchase?.grnNumber ?? null,
+        purchaseStatus: item.PurchaseInvoice?.purchase?.purchaseTransportStatus ?? null,
+        quantity: item.quantity,
+        costPricePerCarton: rates.carton,
+        costPricePerPacket: rates.packet,
+        gstPercentage: rates.gstPercent,
+        mrp: item.mrp ?? null,
+      };
+    })
+    .sort((a, b) => {
+      const left = a.invoiceDate ?? "";
+      const right = b.invoiceDate ?? "";
+      return left.localeCompare(right);
+    });
+
+  const priced = lines.filter((line) => line.costPricePerCarton > 0);
+  const costs = priced.map((line) => line.costPricePerCarton);
+  const first = priced[0];
+  const last = priced[priced.length - 1];
+  const average =
+    costs.length > 0 ? costs.reduce((sum, cost) => sum + cost, 0) / costs.length : null;
+  const changePct =
+    first && last && first.costPricePerCarton > 0
+      ? Math.round(
+          ((last.costPricePerCarton - first.costPricePerCarton) /
+            first.costPricePerCarton) *
+            1000
+        ) / 10
+      : null;
+
+  return {
+    product: {
+      id: product.id,
+      name: product.name,
+      code: product.productCode,
+      mrp: product.mrp,
+      packetsPerCarton: product.packetsPerCarton,
+      currentCostPerPacket: product.costPricePerPacket,
+      currentCostPerCarton: product.costPricePerCarton,
+      isDiscontinued: product.isDiscontinued,
+    },
+    stats: {
+      purchaseCount: new Set(
+        lines.map((line) => line.purchaseId).filter(Boolean)
+      ).size,
+      lineCount: lines.length,
+      minCostPerCarton: costs.length ? Math.min(...costs) : null,
+      maxCostPerCarton: costs.length ? Math.max(...costs) : null,
+      averageCostPerCarton: average !== null ? Math.round(average * 100) / 100 : null,
+      firstCostPerCarton: first?.costPricePerCarton ?? null,
+      lastCostPerCarton: last?.costPricePerCarton ?? null,
+      changePct,
+    },
+    lines,
+    truncated,
+    notes: [
+      "Costs are purchase-invoice snapshots, not the current product master.",
+      "Carton rate is derived from the packet rate when packetsPerCarton is greater than zero.",
+      "Lines are ordered oldest to newest; the most recent snapshot is last.",
+    ],
+  };
+}
+
+export async function reconcilePurchase(args: ReconcilePurchaseArgs) {
+  const hasIdentity = Boolean(
+    args.purchaseId || args.grnNumber || args.invoiceID || args.vehicleNumber
+  );
+
+  if (!hasIdentity) {
+    const workspace = await purchaseWorkspace({ limit: 50 });
+    const issues = workspace.purchases.filter((row) => row.attention.length > 0);
+    return {
+      scope: "workspace",
+      counts: workspace.counts,
+      attentionCounts: workspace.attentionCounts,
+      totals: workspace.totals,
+      invoicesWithoutAmounts: null,
+      purchasesWithIssues: issues.slice(0, 25),
+      notes: [
+        "No purchase identifier was supplied, so this is a workspace audit of active purchases.",
+        "To check one purchase in detail, pass purchaseId, GRN, invoice number, or vehicle number.",
+      ],
+    };
+  }
+
+  const purchase = await resolvePurchase({
+    purchaseId: args.purchaseId,
+    grnNumber: args.grnNumber,
+    invoiceID: args.invoiceID,
+    vehicleNumber: args.vehicleNumber,
+  });
+
+  const invoices = purchase.PurchaseInvoice;
+  const items = invoices.flatMap((invoice) => invoice.PurchaseInvoiceItem);
+  const cartons = items.reduce((sum, item) => sum + (item.quantity ?? 0), 0);
+  const invoiceAmountTotal = invoices.reduce(
+    (sum, invoice) => sum + (invoice.invoiceAmount ?? 0),
+    0
+  );
+  const computedAmountTotal = invoices.reduce(
+    (sum, invoice) => sum + computePurchaseInvoiceAmountFromItems(invoice.PurchaseInvoiceItem),
+    0
+  );
+  const variance = invoiceAmountTotal - computedAmountTotal;
+  const pricingComplete = isPurchasePricingComplete(invoices);
+  const stockAdded = purchase.stockBatches.length > 0;
+  const invoiceIDs = invoices.map((invoice) => invoice.invoiceID).filter(Boolean);
+  const duplicateInvoiceIDs = invoiceIDs.filter(
+    (id, index) => invoiceIDs.indexOf(id) !== index
+  );
+  const missingInvoiceDates = invoices
+    .filter((invoice) => !invoice.invoiceDate)
+    .map((invoice) => invoice.invoiceID ?? invoice.id);
+  const missingPricing = items
+    .filter(
+      (item) =>
+        !item.mrp ||
+        !item.costPricePerPacket ||
+        !item.costPricePerCarton
+    )
+    .map((item) => ({
+      product: item.product?.name ?? item.productId,
+      code: item.product?.productCode ?? null,
+      mrp: item.mrp ?? 0,
+      costPricePerPacket: item.costPricePerPacket ?? 0,
+      costPricePerCarton: item.costPricePerCarton ?? 0,
+    }));
+
+  const status = purchase.purchaseTransportStatus;
+  const checks: Array<{
+    code: string;
+    ok: boolean;
+    severity: "info" | "warning" | "error";
+    message: string;
+  }> = [
+    {
+      code: "invoices_present",
+      ok: invoices.length > 0,
+      severity: invoices.length > 0 ? "info" : "error",
+      message: invoices.length > 0 ? `${invoices.length} invoice(s).` : "No invoices.",
+    },
+    {
+      code: "invoice_dates",
+      ok: missingInvoiceDates.length === 0,
+      severity: missingInvoiceDates.length === 0 ? "info" : "warning",
+      message:
+        missingInvoiceDates.length === 0
+          ? "Every invoice has a date."
+          : `Missing invoice date: ${missingInvoiceDates.join(", ")}.`,
+    },
+    {
+      code: "pricing_complete",
+      ok: pricingComplete,
+      severity: pricingComplete ? "info" : "error",
+      message: pricingComplete
+        ? "MRP and both cost rates are set on every line."
+        : `${missingPricing.length} line(s) have missing MRP/cost pricing.`,
+    },
+    {
+      code: "invoice_amount_variance",
+      ok: Math.abs(variance) <= 1,
+      severity: Math.abs(variance) <= 1 ? "info" : "warning",
+      message:
+        Math.abs(variance) <= 1
+          ? "Invoice amounts match the line snapshots."
+          : `Invoice amount total differs from computed lines by ${formatInr(variance)}.`,
+    },
+    {
+      code: "grn_present",
+      ok:
+        !["ARRIVED", "UNLOADING", "UNLOADED", "EXITED"].includes(status) ||
+        Boolean(purchase.grnNumber?.trim()),
+      severity: "warning",
+      message: purchase.grnNumber
+        ? `GRN ${purchase.grnNumber}.`
+        : "No GRN number is set.",
+    },
+    {
+      code: "arrival_timestamp",
+      ok:
+        !["ARRIVED", "UNLOADING", "UNLOADED", "EXITED"].includes(status) ||
+        Boolean(purchase.markedArrivedAt),
+      severity: "warning",
+      message: purchase.markedArrivedAt
+        ? "Arrival timestamp is set."
+        : "Arrival timestamp is not set.",
+    },
+    {
+      code: "unload_timestamp",
+      ok:
+        !["UNLOADED", "EXITED"].includes(status) || Boolean(purchase.markedUnloadedAt),
+      severity: "warning",
+      message: purchase.markedUnloadedAt
+        ? "Unload timestamp is set."
+        : "Unload timestamp is not set.",
+    },
+    {
+      code: "stock_added",
+      ok:
+        !["UNLOADED", "EXITED"].includes(status) || stockAdded || purchase.purchaseStockBatches.length === 0,
+      severity: "warning",
+      message: stockAdded
+        ? "Live stock exists for this purchase."
+        : purchase.purchaseStockBatches.length === 0
+          ? "No planned batches to transfer."
+          : "Planned batches exist but live stock has not been added.",
+    },
+    {
+      code: "stock_timestamp",
+      ok: !stockAdded || Boolean(purchase.stockAddedAt),
+      severity: "info",
+      message: purchase.stockAddedAt
+        ? "Stock added timestamp is set."
+        : "Stock added timestamp is missing.",
+    },
+    {
+      code: "duplicate_invoice_ids",
+      ok: duplicateInvoiceIDs.length === 0,
+      severity: "warning",
+      message:
+        duplicateInvoiceIDs.length === 0
+          ? "No duplicate invoice numbers."
+          : `Duplicate invoice numbers: ${[...new Set(duplicateInvoiceIDs)].join(", ")}.`,
+    },
+  ];
+
+  const nextActions: string[] = [];
+  if (!purchase.grnNumber && ["ARRIVED", "UNLOADING", "UNLOADED", "EXITED"].includes(status)) {
+    nextActions.push("Set the GRN number.");
+  }
+  if (!pricingComplete) nextActions.push("Complete MRP and cost pricing before COMPLETED.");
+  if (
+    !stockAdded &&
+    purchase.purchaseStockBatches.length > 0 &&
+    ["UNLOADED", "EXITED"].includes(status)
+  ) {
+    nextActions.push("Add the purchase to stock (or mark COMPLETED).");
+  }
+  if (!purchase.TargetUnloadingDate) nextActions.push("Set a target unloading date.");
+  if (invoices.length === 0) nextActions.push("Add at least one supplier invoice.");
+
+  return {
+    scope: "purchase",
+    purchase: {
+      id: purchase.id,
+      label:
+        purchase.vehicleNumber || purchase.grnNumber || invoiceIDs[0] || purchase.id,
+      transporter: purchase.Transporter?.name ?? "Unknown",
+      vehicleNumber: purchase.vehicleNumber,
+      grnNumber: purchase.grnNumber,
+      status,
+      purchaseDate: istDateString(purchase.purchaseDate),
+      targetUnloadingDate: purchase.TargetUnloadingDate
+        ? istDateString(purchase.TargetUnloadingDate)
+        : null,
+      markedArrivedAt: purchase.markedArrivedAt
+        ? istDateString(purchase.markedArrivedAt)
+        : null,
+      markedUnloadedAt: purchase.markedUnloadedAt
+        ? istDateString(purchase.markedUnloadedAt)
+        : null,
+      vehicleExitedAt: purchase.VehicleExitedAt
+        ? istDateString(purchase.VehicleExitedAt)
+        : null,
+      stockAddedAt: purchase.stockAddedAt
+        ? istDateString(purchase.stockAddedAt)
+        : null,
+    },
+    summary: {
+      invoiceCount: invoices.length,
+      lineCount: items.length,
+      cartons,
+      invoiceAmountTotal: Math.round(invoiceAmountTotal * 100) / 100,
+      computedAmountTotal: Math.round(computedAmountTotal * 100) / 100,
+      variance: Math.round(variance * 100) / 100,
+      pricingComplete,
+      stockAdded,
+      plannedBatches: purchase.purchaseStockBatches.length,
+      liveBatches: purchase.stockBatches.length,
+    },
+    checks,
+    missingPricing,
+    nextActions,
+    notes: [
+      "Variance is invoiceAmount total minus computed snapshot line total with GST.",
+      "Pricing must be complete before a purchase can be marked COMPLETED.",
+      "COMPLETED also transfers planned batches into live stock.",
+      "This is a read-only reconciliation; use the propose_* tools to prepare fixes.",
+    ],
+  };
 }

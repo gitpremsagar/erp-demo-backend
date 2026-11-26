@@ -6,7 +6,7 @@ import {
   searchOrders,
   searchPurchases,
 } from "./ai.tools.read";
-import { chatCompletion, getDeepSeekConfig, isDeepSeekConfigured } from "./deepseek.client";
+import { chatCompletion, getDeepSeekConfig, isDeepSeekConfigured, messageText } from "./deepseek.client";
 import { toPositiveInt } from "./ai.utils";
 
 const CACHE_TTL_MS = 60 * 1000;
@@ -110,7 +110,7 @@ async function buildNarrative(kind: AiInsightKind, facts: unknown): Promise<stri
       maxTokens: 400,
       timeoutMs: 20000,
     });
-    return result.message.content?.trim() || null;
+    return messageText(result.message.content).trim() || null;
   } catch {
     return null;
   }

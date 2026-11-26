@@ -2,7 +2,7 @@ import type { AiLineItemsResult, AiUnresolvedLineItem } from "./ai.type";
 import type { AiLineItemsRequestInput } from "./ai.schema";
 import { getCatalog } from "./ai.catalogCache";
 import { matchCandidate } from "./ai.matching";
-import { chatCompletion, isDeepSeekConfigured } from "./deepseek.client";
+import { chatCompletion, isDeepSeekConfigured, messageText } from "./deepseek.client";
 import { normalizeText, safeJsonParse } from "./ai.utils";
 
 interface ExtractedLine {
@@ -106,7 +106,7 @@ async function extractWithAi(text: string): Promise<ExtractedLine[]> {
       timeoutMs: 15000,
     });
 
-    const parsed = extractAiJson(result.message.content ?? "") as
+    const parsed = extractAiJson(messageText(result.message.content)) as
       | { items?: Array<{ name?: string; quantity?: number }> }
       | null;
 

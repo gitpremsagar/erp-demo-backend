@@ -33,6 +33,14 @@ export const AiActionResultSchema = z.object({
   message: z.string().max(1000).optional(),
 });
 
+export const AiChatPurchaseRefSchema = z.object({
+  id: z.string().min(1).max(40),
+  label: z.string().max(200).optional(),
+  status: z.string().max(40).optional(),
+  vehicleNumber: z.string().max(80).nullable().optional(),
+  transporter: z.string().max(200).nullable().optional(),
+});
+
 export const AiChatRequestSchema = z
   .object({
     messages: z.array(AiClientMessageSchema).min(1).max(30),
@@ -42,6 +50,15 @@ export const AiChatRequestSchema = z
         entityType: z.string().max(40).optional(),
         entityId: z.string().max(120).optional(),
         entityLabel: z.string().max(200).optional(),
+        assistant: z.literal("purchase").optional(),
+        filters: z
+          .object({
+            unloadingFrom: z.string().max(40).optional(),
+            unloadingTo: z.string().max(40).optional(),
+          })
+          .optional(),
+        visiblePurchases: z.array(AiChatPurchaseRefSchema).max(80).optional(),
+        selectedPurchase: AiChatPurchaseRefSchema.optional(),
       })
       .optional(),
     actionResult: AiActionResultSchema.optional(),
@@ -148,6 +165,54 @@ export const SearchPurchasesArgsSchema = z.object({
 
 export const GetPurchaseArgsSchema = z.object({
   purchaseId: z.string().min(1).max(40),
+});
+
+const PurchaseStatusFilterSchema = z.array(z.enum(PURCHASE_STATUS_VALUES)).max(10).optional();
+
+export const PurchaseWorkspaceArgsSchema = z.object({
+  purchaseIds: z.array(z.string().max(40)).max(100).optional(),
+  statuses: PurchaseStatusFilterSchema,
+  unloadingFrom: z.string().max(40).optional(),
+  unloadingTo: z.string().max(40).optional(),
+  limit: LimitSchema,
+});
+
+export const PurchaseAnalyticsArgsSchema = z.object({
+  dateFrom: z.string().max(40).optional(),
+  dateTo: z.string().max(40).optional(),
+  transporterName: z.string().max(200).optional(),
+  groupBy: z.enum(["supplier", "month", "product", "status"]).optional(),
+  limit: LimitSchema,
+});
+
+export const SupplierPurchaseHistoryArgsSchema = z
+  .object({
+    transporterId: z.string().max(40).optional(),
+    transporterQuery: z.string().max(200).optional(),
+    dateFrom: z.string().max(40).optional(),
+    dateTo: z.string().max(40).optional(),
+    limit: LimitSchema,
+  })
+  .refine((data) => Boolean(data.transporterId || data.transporterQuery), {
+    message: "Provide transporterId or transporterQuery (supplier name)",
+  });
+
+export const PurchasePriceHistoryArgsSchema = z
+  .object({
+    productId: z.string().max(40).optional(),
+    productCode: z.string().max(120).optional(),
+    productName: z.string().max(200).optional(),
+    limit: LimitSchema,
+  })
+  .refine((data) => Boolean(data.productId || data.productCode || data.productName), {
+    message: "Provide productId, productCode, or productName",
+  });
+
+export const ReconcilePurchaseArgsSchema = z.object({
+  purchaseId: z.string().max(80).optional(),
+  grnNumber: z.string().max(120).optional(),
+  invoiceID: z.string().max(120).optional(),
+  vehicleNumber: z.string().max(80).optional(),
 });
 
 export const SearchProductsArgsSchema = z.object({
@@ -297,6 +362,57 @@ export const ProposeAddPurchaseToStockArgsSchema = z
           data.vehicleNumber
       ),
     { message: "Provide purchaseId, grnNumber, invoiceID, or vehicleNumber" }
+  );
+
+export const ProposeUpdatePurchaseGrnArgsSchema = z
+  .object({
+    purchaseId: z.string().max(80).optional(),
+    vehicleNumber: z.string().max(80).optional(),
+    invoiceID: z.string().max(120).optional(),
+    currentGrnNumber: z.string().max(120).optional(),
+    grnNumber: z.string().trim().min(1).max(120),
+  })
+  .refine(
+    (data) =>
+      Boolean(
+        data.purchaseId ||
+          data.vehicleNumber ||
+          data.invoiceID ||
+          data.currentGrnNumber
+      ),
+    {
+      message:
+        "Provide purchaseId, vehicleNumber, invoiceID, or currentGrnNumber to identify the purchase",
+    }
+  );
+
+export const ProposeUpdatePurchaseDatetimesArgsSchema = z
+  .object({
+    ...PurchaseIdentityFields,
+    purchaseDate: z.string().max(40).optional(),
+    markedArrivedAt: z.string().max(40).nullable().optional(),
+    TargetUnloadingDate: z.string().max(40).nullable().optional(),
+    markedUnloadedAt: z.string().max(40).nullable().optional(),
+    VehicleExitedAt: z.string().max(40).nullable().optional(),
+  })
+  .refine(
+    (data) =>
+      Boolean(
+        data.purchaseId ||
+          data.grnNumber ||
+          data.invoiceID ||
+          data.vehicleNumber
+      ),
+    { message: "Provide purchaseId, grnNumber, invoiceID, or vehicleNumber" }
+  )
+  .refine(
+    (data) =>
+      data.purchaseDate !== undefined ||
+      data.markedArrivedAt !== undefined ||
+      data.TargetUnloadingDate !== undefined ||
+      data.markedUnloadedAt !== undefined ||
+      data.VehicleExitedAt !== undefined,
+    { message: "Provide at least one datetime field to update" }
   );
 
 export const BusinessOverviewArgsSchema = z.object({

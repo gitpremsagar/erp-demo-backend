@@ -7,6 +7,7 @@ import { initSse, startSseHeartbeat, writeSseEvent } from "./ai.sse";
 import { parseInvoiceRows } from "./ai.invoiceParse.service";
 import { extractLineItems } from "./ai.lineItems.service";
 import { getInsight } from "./ai.insights.service";
+import { extractInvoiceImages } from "./ai.invoiceImage.service";
 import type { AiChatEvent, AiStatusResponse } from "./ai.type";
 
 function actorId(req: Request): string | null {
@@ -30,7 +31,11 @@ export const getAiStatus = (_req: Request, res: Response) => {
   res.json(body);
 };
 
-export const postAiChat = async (req: Request, res: Response) => {
+async function handleAiChat(
+  req: Request,
+  res: Response,
+  profile: "general" | "purchase"
+) {
   const parsed = AiChatRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({
@@ -64,6 +69,7 @@ export const postAiChat = async (req: Request, res: Response) => {
       const result = await runAiChat({
         request,
         actorId: userId,
+        profile,
         signal: controller.signal,
         emit: (event) => events.push(event),
       });
@@ -91,6 +97,7 @@ export const postAiChat = async (req: Request, res: Response) => {
     await runAiChat({
       request,
       actorId: userId,
+      profile,
       signal: controller.signal,
       emit: (event) => writeSseEvent(res, event),
     });
@@ -107,6 +114,34 @@ export const postAiChat = async (req: Request, res: Response) => {
     res.off("close", onClose);
     if (!res.writableEnded && !res.destroyed) res.end();
   }
+}
+
+export const postAiChat = (req: Request, res: Response) =>
+  handleAiChat(req, res, "general");
+
+export const postPurchaseAiChat = (req: Request, res: Response) =>
+  handleAiChat(req, res, "purchase");
+
+export const getPurchaseAiStatus = (_req: Request, res: Response) => {
+  const config = getDeepSeekConfig();
+  const body: AiStatusResponse = {
+    enabled: isDeepSeekConfigured(),
+    model: config.model,
+    assistant: "purchase",
+    capabilities: [
+      "purchase_chat",
+      "purchase_workspace",
+      "purchase_analytics",
+      "purchase_actions",
+    ],
+    deterministicFallback: true,
+    limits: {
+      maxMessages: 30,
+      maxMessageChars: 4000,
+      maxInvoiceRows: 300,
+    },
+  };
+  res.json(body);
 };
 
 export const postAiInvoiceParse = async (req: Request, res: Response) => {
@@ -125,6 +160,72 @@ export const postAiInvoiceParse = async (req: Request, res: Response) => {
   } catch (error) {
     console.error("AI invoice parse failed:\n", error);
     res.status(500).json({ message: "Invoice parsing failed" });
+  }
+};
+
+const ALLOWED_INVOICE_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+
+export const postPurchaseInvoiceExtract = async (req: Request, res: Response) => {
+  const files = ((req.files as Express.Multer.File[] | undefined) ?? []).filter(
+    (file) => file.size > 0
+  );
+  if (!files.length) {
+    res.status(400).json({
+      message: "Upload at least one invoice image or PDF.",
+    });
+    return;
+  }
+  if (files.length > 10) {
+    res.status(400).json({ message: "Upload at most 10 invoice pages at a time." });
+    return;
+  }
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+  if (totalBytes > 24 * 1024 * 1024) {
+    res.status(413).json({
+      message: "The combined invoice upload is too large. Use fewer pages or smaller images.",
+    });
+    return;
+  }
+
+  const invalid = files.find((file) => !ALLOWED_INVOICE_IMAGE_TYPES.has(file.mimetype));
+  if (invalid) {
+    res.status(400).json({
+      message: `Unsupported file type "${invalid.mimetype}". Upload JPEG, PNG, WebP, or a PDF.`,
+    });
+    return;
+  }
+
+  const vehicleNumber =
+    typeof req.body?.vehicleNumber === "string" && req.body.vehicleNumber.trim()
+      ? req.body.vehicleNumber.trim().slice(0, 80)
+      : undefined;
+  const supplierName =
+    typeof req.body?.supplierName === "string" && req.body.supplierName.trim()
+      ? req.body.supplierName.trim().slice(0, 200)
+      : undefined;
+  const notes =
+    typeof req.body?.notes === "string" && req.body.notes.trim()
+      ? req.body.notes.trim().slice(0, 1000)
+      : undefined;
+
+  try {
+    const result = await extractInvoiceImages({
+      images: files.map((file) => ({
+        name: file.originalname,
+        dataUrl: `data:${file.mimetype};base64,${file.buffer.toString("base64")}`,
+      })),
+      vehicleNumber,
+      supplierName,
+      notes,
+    });
+    res.json(result);
+  } catch (error) {
+    console.error("Purchase invoice image extraction failed:\n", error);
+    res.status(500).json({ message: "Invoice image extraction failed" });
   }
 };
 

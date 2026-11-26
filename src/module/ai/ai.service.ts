@@ -10,10 +10,13 @@ import {
   DeepSeekError,
   chatCompletion,
   isDeepSeekConfigured,
+  messageText,
   type DeepSeekMessage,
 } from "./deepseek.client";
 import { ACTION_RESULT_PREFIX, buildSystemPrompt } from "./ai.prompt";
+import { buildPurchaseSystemPrompt } from "./ai.purchase.prompt";
 import {
+  AI_PURCHASE_TOOLS,
   AI_TOOLS,
   executeProposalTool,
   executeReadTool,
@@ -76,12 +79,13 @@ function actionResultMessage(actionResult: AiActionResult): string {
 export interface RunAiChatOptions {
   request: AiChatRequest;
   actorId: string;
+  profile?: "general" | "purchase";
   signal?: AbortSignal;
   emit: (event: AiChatEvent) => void;
 }
 
 export async function runAiChat(options: RunAiChatOptions): Promise<AiChatResult> {
-  const { request, actorId, signal, emit } = options;
+  const { request, actorId, signal, emit, profile = "general" } = options;
   const events: AiChatEvent[] = [];
   const emitAndRecord = (event: AiChatEvent) => {
     events.push(event);
@@ -101,7 +105,10 @@ export async function runAiChat(options: RunAiChatOptions): Promise<AiChatResult
   const messages: DeepSeekMessage[] = [
     {
       role: "system",
-      content: buildSystemPrompt(request.context),
+      content:
+        profile === "purchase"
+          ? buildPurchaseSystemPrompt(request.context)
+          : buildSystemPrompt(request.context),
     },
     ...request.messages.map<DeepSeekMessage>((message) => ({
       role: message.role,
@@ -158,7 +165,7 @@ export async function runAiChat(options: RunAiChatOptions): Promise<AiChatResult
       const remainingMs = Math.max(1000, deadline - Date.now());
       const result = await chatCompletion({
         messages,
-        tools: [...AI_TOOLS],
+        tools: profile === "purchase" ? [...AI_PURCHASE_TOOLS] : [...AI_TOOLS],
         signal,
         timeoutMs: Math.min(requestTimeoutMs, remainingMs),
       });
@@ -187,7 +194,7 @@ export async function runAiChat(options: RunAiChatOptions): Promise<AiChatResult
           continue;
         }
 
-        const content = result.message.content?.trim();
+        const content = messageText(result.message.content).trim();
         if (content) {
           message = content;
           emitAndRecord({ type: "message", content });

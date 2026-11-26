@@ -175,7 +175,7 @@ async function aiResolveProducts(unresolved, allowedByRow) {
             maxTokens: 1200,
             timeoutMs: 20000,
         });
-        const content = result.message.content ?? "";
+        const content = (0, deepseek_client_1.messageText)(result.message.content);
         const parsed = extractJsonObject(content);
         const matches = new Map();
         for (const match of parsed?.matches ?? []) {
@@ -324,14 +324,27 @@ async function parseInvoiceRows(input) {
                 reason: "No supplier/transporter found on the sheet",
             });
         }
-        // Resolve product (explicit resolution, exact/fuzzy match).
+        // Resolve product (explicit resolution, exact/fuzzy match). OCR can
+        // misread a code while the printed name is correct, so try both.
         let productId = null;
         const explicitProduct = resolution?.productId;
         if (explicitProduct && productNameById.has(explicitProduct)) {
             productId = explicitProduct;
         }
         else {
-            const match = (0, ai_matching_1.matchCandidate)(productRaw, productCandidates);
+            let match = productCodeCell
+                ? (0, ai_matching_1.matchCandidate)(productCodeCell, productCandidates)
+                : (0, ai_matching_1.matchCandidate)(productNameCell, productCandidates);
+            if (!match.match && productCodeCell && productNameCell) {
+                const nameMatch = (0, ai_matching_1.matchCandidate)(productNameCell, productCandidates);
+                if (nameMatch.match) {
+                    match = nameMatch;
+                }
+                else if (nameMatch.candidates.length) {
+                    // Prefer the name candidates when the code did not resolve.
+                    match = nameMatch;
+                }
+            }
             if (match.match) {
                 productId = match.match.id;
             }

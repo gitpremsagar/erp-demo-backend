@@ -87,7 +87,7 @@ async function extractWithAi(text) {
             maxTokens: 800,
             timeoutMs: 15000,
         });
-        const parsed = extractAiJson(result.message.content ?? "");
+        const parsed = extractAiJson((0, deepseek_client_1.messageText)(result.message.content));
         return (parsed?.items ?? [])
             .map((item) => ({
             raw: `${item.quantity ?? ""} ${item.name ?? ""}`.trim(),

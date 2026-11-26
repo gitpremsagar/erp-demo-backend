@@ -13,7 +13,7 @@ import type {
 import type { AiInvoiceParseRequestInput } from "./ai.schema";
 import { getCatalog } from "./ai.catalogCache";
 import { matchCandidate } from "./ai.matching";
-import { chatCompletion, isDeepSeekConfigured } from "./deepseek.client";
+import { chatCompletion, isDeepSeekConfigured, messageText } from "./deepseek.client";
 import {
   istDateString,
   normalizeText,
@@ -238,7 +238,7 @@ async function aiResolveProducts(
       timeoutMs: 20000,
     });
 
-    const content = result.message.content ?? "";
+    const content = messageText(result.message.content);
     const parsed = extractJsonObject(content) as
       | { matches?: Array<{ rowIndex?: number; productId?: string | null }> }
       | null;
@@ -403,13 +403,25 @@ export async function parseInvoiceRows(
         reason: "No supplier/transporter found on the sheet",
       });
     }
-    // Resolve product (explicit resolution, exact/fuzzy match).
+    // Resolve product (explicit resolution, exact/fuzzy match). OCR can
+    // misread a code while the printed name is correct, so try both.
     let productId: string | null = null;
     const explicitProduct = resolution?.productId;
     if (explicitProduct && productNameById.has(explicitProduct)) {
       productId = explicitProduct;
     } else {
-      const match = matchCandidate(productRaw, productCandidates);
+      let match = productCodeCell
+        ? matchCandidate(productCodeCell, productCandidates)
+        : matchCandidate(productNameCell, productCandidates);
+      if (!match.match && productCodeCell && productNameCell) {
+        const nameMatch = matchCandidate(productNameCell, productCandidates);
+        if (nameMatch.match) {
+          match = nameMatch;
+        } else if (nameMatch.candidates.length) {
+          // Prefer the name candidates when the code did not resolve.
+          match = nameMatch;
+        }
+      }
       if (match.match) {
         productId = match.match.id;
       } else {

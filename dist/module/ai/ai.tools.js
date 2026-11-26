@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AI_TOOLS = exports.PROPOSAL_TOOL_NAMES = void 0;
+exports.AI_PURCHASE_TOOLS = exports.AI_TOOLS = exports.PROPOSAL_TOOL_NAMES = void 0;
 exports.isProposalTool = isProposalTool;
 exports.toolLabel = toolLabel;
 exports.executeReadTool = executeReadTool;
@@ -16,6 +16,8 @@ exports.PROPOSAL_TOOL_NAMES = new Set([
     "propose_create_purchase",
     "propose_update_purchase_status",
     "propose_add_purchase_to_stock",
+    "propose_update_purchase_grn",
+    "propose_update_purchase_datetimes",
 ]);
 function isProposalTool(name) {
     return exports.PROPOSAL_TOOL_NAMES.has(name);
@@ -446,12 +448,171 @@ exports.AI_TOOLS = [
         },
     },
 ];
+/**
+ * Tools that only the purchase assistant may see. Keeping them out of AI_TOOLS
+ * means the general assistant's tool set is unchanged.
+ */
+const PURCHASE_EXTRA_TOOLS = [
+    {
+        type: "function",
+        function: {
+            name: "purchase_workspace",
+            description: "Snapshot of active purchases (status not COMPLETED) for the purchase workspace. Returns vehicle counts by loading/in-transit/unloaded segment, totals, and per-vehicle attention flags: missing GRN, incomplete pricing, stock not added, missing target unloading date, long transit, and awaiting unloading. Use this first for questions like what needs attention, what is in transit, or which purchases are stuck.",
+            parameters: {
+                type: "object",
+                properties: {
+                    purchaseIds: {
+                        type: "array",
+                        items: stringProp("Purchase id"),
+                        description: "Limit to these purchase ids (for example the rows the user can currently see)",
+                    },
+                    statuses: {
+                        type: "array",
+                        items: { type: "string" },
+                        description: "Optional transport status filter",
+                    },
+                    unloadingFrom: stringProp("Target unloading date from YYYY-MM-DD"),
+                    unloadingTo: stringProp("Target unloading date to YYYY-MM-DD"),
+                    limit: numberProp("Max vehicles (default 50, max 100)"),
+                },
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "purchase_analytics",
+            description: "Purchase spend analytics for a date range based on supplier invoice dates. Returns totals, average invoice value, spend groups (supplier/month/product/status), top suppliers, top products, monthly trend, and a status breakdown. Use for spend, supplier mix, product purchase mix, and month comparisons. Do not use order/sales tools for purchase spend.",
+            parameters: {
+                type: "object",
+                properties: {
+                    dateFrom: stringProp("Invoice date from YYYY-MM-DD (default 30 days ago)"),
+                    dateTo: stringProp("Invoice date to YYYY-MM-DD (default today)"),
+                    transporterName: stringProp("Optional supplier/transporter name filter"),
+                    groupBy: {
+                        type: "string",
+                        enum: ["supplier", "month", "product", "status"],
+                        description: "Primary grouping (default supplier)",
+                    },
+                    limit: numberProp("Groups returned (default 12, max 25)"),
+                },
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "supplier_purchase_history",
+            description: "Recent purchase history for one supplier/transporter, resolved by name or id. Returns the purchases with status, GRN, dates, invoice numbers, cartons, spend, stock/pricing flags, plus a product mix with cartons, spend, and last cost per carton. Use for questions about a specific supplier or 'where do we buy X from'.",
+            parameters: {
+                type: "object",
+                properties: {
+                    transporterId: stringProp("Transporter id, if known"),
+                    transporterQuery: stringProp("Supplier/transporter name; resolved server-side with fuzzy matching"),
+                    dateFrom: stringProp("Invoice date from YYYY-MM-DD (default 90 days ago)"),
+                    dateTo: stringProp("Invoice date to YYYY-MM-DD (default today)"),
+                    limit: numberProp("Purchases returned (default 10, max 25)"),
+                },
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "purchase_price_history",
+            description: "Purchase cost history for one product, resolved by id, exact code, or name. Returns invoice snapshots ordered oldest to newest with supplier, invoice date, quantity, cost per carton/packet, GST, and MRP, plus min/max/average and change percentage. Use for cost trend, price change, and 'what did we last pay for X' questions.",
+            parameters: {
+                type: "object",
+                properties: {
+                    productId: stringProp("Product id, if known"),
+                    productCode: stringProp("Exact product code"),
+                    productName: stringProp("Product name; resolved server-side with fuzzy matching"),
+                    limit: numberProp("Invoice lines returned (default 15, max 30)"),
+                },
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "reconcile_purchase",
+            description: "Read-only purchase audit. With a purchase id/GRN/invoice/vehicle, checks invoices, missing invoice dates, pricing completeness, invoice amount vs computed line totals, GRN presence, arrival/unload timestamps, stock-added state, and duplicate invoice numbers, then suggests next actions. Without an identifier, audits all active purchases and lists those with attention flags.",
+            parameters: {
+                type: "object",
+                properties: {
+                    purchaseId: stringProp("Purchase id, or a GRN/invoice/vehicle fragment"),
+                    grnNumber: stringProp("GRN number"),
+                    invoiceID: stringProp("Supplier invoice number"),
+                    vehicleNumber: stringProp("Vehicle number"),
+                },
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "propose_update_purchase_grn",
+            description: "Propose setting or replacing the GRN number on a purchase. This DOES NOT change anything; it returns a confirmation card. Identify the purchase with purchaseId, vehicleNumber, invoiceID, or currentGrnNumber. grnNumber is the NEW value. Completed purchases cannot be modified.",
+            parameters: {
+                type: "object",
+                properties: {
+                    purchaseId: stringProp("Purchase id, if known"),
+                    vehicleNumber: stringProp("Vehicle number to identify the purchase"),
+                    invoiceID: stringProp("Supplier invoice number to identify the purchase"),
+                    currentGrnNumber: stringProp("Existing GRN number to identify the purchase"),
+                    grnNumber: stringProp("New GRN number to set"),
+                },
+                required: ["grnNumber"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "propose_update_purchase_datetimes",
+            description: "Propose changing manual purchase dates: purchaseDate, markedArrivedAt, TargetUnloadingDate, markedUnloadedAt, or VehicleExitedAt. This DOES NOT change anything; it returns a confirmation card. Pass ISO dates (YYYY-MM-DD) and null to clear a non-required date. At least one date field is required. Identify the purchase with purchaseId, GRN, invoice number, or vehicle number.",
+            parameters: {
+                type: "object",
+                properties: {
+                    purchaseId: stringProp("Purchase id, or a GRN/invoice/vehicle fragment"),
+                    grnNumber: stringProp("GRN number"),
+                    invoiceID: stringProp("Supplier invoice number"),
+                    vehicleNumber: stringProp("Vehicle number"),
+                    purchaseDate: stringProp("New purchase date YYYY-MM-DD (cannot be cleared)"),
+                    markedArrivedAt: stringProp("Vehicle arrived on YYYY-MM-DD, or null to clear"),
+                    TargetUnloadingDate: stringProp("Target unloading date YYYY-MM-DD, or null to clear"),
+                    markedUnloadedAt: stringProp("Unloading completed on YYYY-MM-DD, or null to clear"),
+                    VehicleExitedAt: stringProp("Vehicle exited on YYYY-MM-DD, or null to clear"),
+                },
+            },
+        },
+    },
+];
+const PURCHASE_BASE_TOOL_NAMES = new Set([
+    "search_purchases",
+    "get_purchase",
+    "search_products",
+    "search_transporters",
+    "propose_create_purchase",
+    "propose_update_purchase_status",
+    "propose_add_purchase_to_stock",
+]);
+/** Tool set for the dedicated purchase assistant. */
+exports.AI_PURCHASE_TOOLS = [
+    ...exports.AI_TOOLS.filter((tool) => PURCHASE_BASE_TOOL_NAMES.has(tool.function.name)),
+    ...PURCHASE_EXTRA_TOOLS,
+];
 const TOOL_LABELS = {
     search_orders: "Searching orders",
     get_order: "Opening order",
     customer_order_history: "Evaluating customer order history",
     search_purchases: "Searching purchases",
     get_purchase: "Opening purchase",
+    purchase_workspace: "Reviewing the purchase workspace",
+    purchase_analytics: "Analyzing purchase spend",
+    supplier_purchase_history: "Reading supplier purchase history",
+    purchase_price_history: "Checking purchase price history",
+    reconcile_purchase: "Auditing the purchase",
     search_products: "Searching products",
     search_customers: "Searching customers",
     search_transporters: "Searching transporters",
@@ -465,6 +626,8 @@ const TOOL_LABELS = {
     propose_create_purchase: "Preparing purchase",
     propose_update_purchase_status: "Preparing purchase status change",
     propose_add_purchase_to_stock: "Preparing add-to-stock",
+    propose_update_purchase_grn: "Preparing GRN update",
+    propose_update_purchase_datetimes: "Preparing purchase date updates",
 };
 function toolLabel(name) {
     return TOOL_LABELS[name] ?? "Working";
@@ -506,6 +669,22 @@ function summarizeReadResult(tool, result) {
             return `${value.count ?? 0} purchase(s) found${value.truncated ? " (truncated)" : ""}`;
         case "get_purchase":
             return `Purchase ${String(value.id ?? "")}`;
+        case "purchase_workspace": {
+            const counts = value.counts;
+            return `${counts?.total ?? 0} active purchase(s), ${String(value.truncated ? "truncated" : "complete")}`;
+        }
+        case "purchase_analytics":
+            return `${value.invoiceCount ?? 0} invoice(s), ${String(value.totals?.amountFormatted ?? "")}`;
+        case "supplier_purchase_history":
+            return `${value.purchaseCount ?? 0} purchase(s) from ${String(value.supplier?.name ?? "supplier")}`;
+        case "purchase_price_history":
+            return `${value.stats && value.stats.lineCount ? value.stats.lineCount : 0} price line(s) for ${String(value.product?.name ?? "product")}`;
+        case "reconcile_purchase": {
+            const checks = value.checks;
+            if (!checks)
+                return "Workspace audit ready";
+            return `${checks.filter((check) => !check.ok).length} issue(s) found`;
+        }
         case "search_products":
             return `${value.count ?? 0} product(s) found${value.truncated ? " (truncated)" : ""}`;
         case "search_customers":
@@ -559,6 +738,21 @@ async function executeReadTool(name, rawArgs) {
             case "get_purchase":
                 result = await withTimeout((0, ai_tools_read_1.getPurchase)(validate(ai_schema_1.GetPurchaseArgsSchema, rawArgs)), timeoutMs, name);
                 break;
+            case "purchase_workspace":
+                result = await withTimeout((0, ai_tools_read_1.purchaseWorkspace)(validate(ai_schema_1.PurchaseWorkspaceArgsSchema, rawArgs)), timeoutMs, name);
+                break;
+            case "purchase_analytics":
+                result = await withTimeout((0, ai_tools_read_1.purchaseAnalytics)(validate(ai_schema_1.PurchaseAnalyticsArgsSchema, rawArgs)), timeoutMs, name);
+                break;
+            case "supplier_purchase_history":
+                result = await withTimeout((0, ai_tools_read_1.supplierPurchaseHistory)(validate(ai_schema_1.SupplierPurchaseHistoryArgsSchema, rawArgs)), timeoutMs, name);
+                break;
+            case "purchase_price_history":
+                result = await withTimeout((0, ai_tools_read_1.purchasePriceHistory)(validate(ai_schema_1.PurchasePriceHistoryArgsSchema, rawArgs)), timeoutMs, name);
+                break;
+            case "reconcile_purchase":
+                result = await withTimeout((0, ai_tools_read_1.reconcilePurchase)(validate(ai_schema_1.ReconcilePurchaseArgsSchema, rawArgs)), timeoutMs, name);
+                break;
             case "search_products":
                 result = await withTimeout((0, ai_tools_read_1.searchProducts)(validate(ai_schema_1.SearchProductsArgsSchema, rawArgs)), timeoutMs, name);
                 break;
@@ -584,10 +778,18 @@ async function executeReadTool(name, rawArgs) {
             default:
                 throw new Error(`Unknown tool: ${name}`);
         }
-        // Order-history evidence (orders + lines + aggregates + suggestion) is
-        // intentionally larger than a normal list result; keep all of it so the
-        // model never sees a half-truncated suggestion.
-        const contentLimit = name === "customer_order_history" ? 48000 : 24000;
+        // Order-history evidence and purchase workspace/analytics payloads are
+        // intentionally larger than a normal list result; keep enough of them so
+        // the model never sees a half-truncated answer.
+        const largeResultTools = new Set([
+            "customer_order_history",
+            "purchase_workspace",
+            "purchase_analytics",
+            "supplier_purchase_history",
+            "purchase_price_history",
+            "reconcile_purchase",
+        ]);
+        const contentLimit = largeResultTools.has(name) ? 48000 : 24000;
         return {
             ok: true,
             content: (0, ai_utils_1.truncateText)(JSON.stringify(result), contentLimit),
@@ -617,6 +819,10 @@ async function executeProposalTool(name, rawArgs, actorId) {
             return (0, ai_proposals_1.proposeUpdatePurchaseStatus)(validate(ai_schema_1.ProposeUpdatePurchaseStatusArgsSchema, rawArgs));
         case "propose_add_purchase_to_stock":
             return (0, ai_proposals_1.proposeAddPurchaseToStock)(validate(ai_schema_1.ProposeAddPurchaseToStockArgsSchema, rawArgs));
+        case "propose_update_purchase_grn":
+            return (0, ai_proposals_1.proposeUpdatePurchaseGrn)(validate(ai_schema_1.ProposeUpdatePurchaseGrnArgsSchema, rawArgs));
+        case "propose_update_purchase_datetimes":
+            return (0, ai_proposals_1.proposeUpdatePurchaseDatetimes)(validate(ai_schema_1.ProposeUpdatePurchaseDatetimesArgsSchema, rawArgs));
         default:
             throw new Error(`Unknown proposal tool: ${name}`);
     }

@@ -12,11 +12,22 @@ export type AiProposalAction =
   | "verify_order_stock"
   | "create_purchase"
   | "update_purchase_status"
-  | "add_purchase_to_stock";
+  | "add_purchase_to_stock"
+  | "update_purchase_grn"
+  | "update_purchase_datetimes";
 
 export interface AiClientMessage {
   role: AiChatRole;
   content: string;
+}
+
+/** A purchase the user can currently see (or has selected) on the purchase screen. */
+export interface AiChatPurchaseRef {
+  id: string;
+  label?: string;
+  status?: string;
+  vehicleNumber?: string | null;
+  transporter?: string | null;
 }
 
 export interface AiChatContext {
@@ -24,6 +35,13 @@ export interface AiChatContext {
   entityType?: "order" | "purchase" | "product" | string;
   entityId?: string;
   entityLabel?: string;
+  assistant?: "purchase";
+  filters?: {
+    unloadingFrom?: string;
+    unloadingTo?: string;
+  };
+  visiblePurchases?: AiChatPurchaseRef[];
+  selectedPurchase?: AiChatPurchaseRef;
 }
 
 export interface AiActionResult {
@@ -113,6 +131,7 @@ export interface AiChatResult {
 export interface AiStatusResponse {
   enabled: boolean;
   model: string;
+  assistant?: "purchase";
   capabilities: string[];
   deterministicFallback: boolean;
   limits: {
@@ -184,6 +203,42 @@ export interface AiInvoiceParseResult {
     headerRowIndex: number;
   };
   aiUsed: boolean;
+}
+
+export interface AiExtractedInvoiceLine {
+  productCode: string | null;
+  productName: string;
+  quantity: number;
+  unit: string;
+  rate: number | null;
+  amount: number | null;
+}
+
+export interface AiExtractedInvoice {
+  invoiceID: string | null;
+  invoiceDate: string | null;
+  supplierName: string | null;
+  vehicleNumber: string | null;
+  driverContact: string | null;
+  lines: AiExtractedInvoiceLine[];
+}
+
+export interface AiInvoiceExtractResult {
+  ok: boolean;
+  error?: string;
+  imageCount: number;
+  invoices: AiExtractedInvoice[];
+  parse: AiInvoiceParseResult | null;
+  proposals: AiProposal[];
+  warnings: string[];
+  stats: {
+    invoices: number;
+    lines: number;
+    matchedLines: number;
+    unresolvedLines: number;
+    proposals: number;
+    aiUsed: boolean;
+  };
 }
 
 export interface AiLineItem {
