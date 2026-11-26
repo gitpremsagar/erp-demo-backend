@@ -73,13 +73,15 @@ Asking the assistant to "add the usual items for <customer>", "reorder for
 <customer>", or "repeat the last order" must never produce guessed products or
 quantities. The model is required to call `customer_order_history` first:
 
-- Resolves the customer from a name, dbName, or `"Name (Area)"`; ambiguous or
-  missing names return candidates instead of a guess.
+- Resolves the customer from a name, dbName, or `"Name (Area)"`; matching is
+  case-insensitive and falls back to a bounded in-memory scan, so casing or
+  extra words do not hide a real account. Ambiguous or missing names return
+  candidates instead of a guess.
 - Reads the last N orders (default 10) with full line items, with no 30-day
   cutoff and completed orders included. Default scope is completed-or-verified;
   `all` is available if the default has too few orders.
 - Aggregates each product: appearances, frequency, total/average/min/max cartons,
-  last-order quantity, and the order dates.
+  last-order quantity, MRP, and the order dates.
 - Applies the requested rules. Defaults are `any` inclusion (a product is
   included if it appeared in at least one of the last 10 evaluated orders) and
   `average` quantity (rounded cartons across the orders where the product
@@ -89,6 +91,9 @@ quantities. The model is required to call `customer_order_history` first:
   anomaly notes (latest order much smaller/larger than earlier ones, one-off
   products, volatile quantities, stale history, discontinued products) and
   data-quality notes (few orders, unverified/open orders, scope counts).
+- Product lines in the assistant's replies and in the draft confirmation card
+  include the product's MRP from the product record. MRP is per packet/piece
+  (INR) and is never derived from the selling price.
 
 The assistant must show the orders used, the rule labels, and the evidence before
 preparing a draft. The server also guards against ungrounded answers: a

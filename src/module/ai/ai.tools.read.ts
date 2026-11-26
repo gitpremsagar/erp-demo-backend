@@ -56,6 +56,87 @@ const distributorDraftVisibility: Prisma.OrderWhereInput = {
   },
 };
 
+const historyCustomerSelect = {
+  id: true,
+  name: true,
+  CustomerDetail: {
+    select: { dbName: true, dbCategory: true, area: true, state: true },
+    take: 1,
+  },
+} as const;
+
+type HistoryCustomerRecord = Prisma.UserGetPayload<{
+  select: typeof historyCustomerSelect;
+}>;
+
+function rankHistoryCustomers(
+  customers: HistoryCustomerRecord[],
+  name: string,
+  raw: string,
+  qualifier: string | null
+) {
+  const normalizedQuery = normalizeText(name);
+  const normalizedRawQuery = normalizeText(raw);
+
+  return customers
+    .map((customer) => {
+      const detail = customer.CustomerDetail[0];
+      const dbName = detail?.dbName ?? customer.name;
+      const normalizedDbName = normalizeText(dbName);
+      const normalizedContactName = normalizeText(customer.name);
+
+      let score = Math.max(similarity(name, dbName), similarity(name, customer.name));
+      if (normalizedDbName === normalizedQuery || normalizedDbName === normalizedRawQuery) {
+        score += 10;
+      }
+      if (
+        normalizedContactName === normalizedQuery ||
+        normalizedContactName === normalizedRawQuery
+      ) {
+        score += 8;
+      } else if (
+        normalizedQuery.length >= 3 &&
+        (normalizedDbName.includes(normalizedQuery) ||
+          normalizedQuery.includes(normalizedDbName))
+      ) {
+        score += 2;
+      }
+
+      if (qualifier) {
+        const normalizedQualifier = normalizeText(qualifier);
+        const area = normalizeText(detail?.area);
+        const state = normalizeText(detail?.state);
+        if (
+          area &&
+          (area.includes(normalizedQualifier) || normalizedQualifier.includes(area))
+        ) {
+          score += 6;
+        } else if (
+          state &&
+          (state.includes(normalizedQualifier) || normalizedQualifier.includes(state))
+        ) {
+          score += 3;
+        }
+      }
+
+      return { customer, dbName, score };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+function isDecisiveCustomerMatch(
+  scored: ReturnType<typeof rankHistoryCustomers>
+): boolean {
+  const best = scored[0];
+  const second = scored[1];
+  if (!best) return false;
+  return (
+    scored.length === 1 ||
+    (second ? best.score - second.score >= 4 : true) ||
+    best.score >= 12
+  );
+}
+
 function statusLabel(status: {
   name?: string | null;
   displayName?: string | null;
@@ -100,11 +181,13 @@ export async function searchOrders(args: SearchOrdersArgs) {
   if (args.customerName) {
     and.push({
       OR: [
-        { Customer: { is: { name: { contains: args.customerName } } } },
+        { Customer: { is: { name: { contains: args.customerName, mode: "insensitive" } } } },
         {
           Customer: {
             is: {
-              CustomerDetail: { some: { dbName: { contains: args.customerName } } },
+              CustomerDetail: {
+                some: { dbName: { contains: args.customerName, mode: "insensitive" } },
+              },
             },
           },
         },
@@ -115,12 +198,14 @@ export async function searchOrders(args: SearchOrdersArgs) {
   if (query) {
     and.push({
       OR: [
-        { customeOrderId: { contains: query } },
-        { Customer: { is: { name: { contains: query } } } },
+        { customeOrderId: { contains: query, mode: "insensitive" } },
+        { Customer: { is: { name: { contains: query, mode: "insensitive" } } } },
         {
           Customer: {
             is: {
-              CustomerDetail: { some: { dbName: { contains: query } } },
+              CustomerDetail: {
+                some: { dbName: { contains: query, mode: "insensitive" } },
+              },
             },
           },
         },
@@ -157,7 +242,7 @@ export async function searchOrders(args: SearchOrdersArgs) {
       OrderItem: {
         select: {
           quantity: true,
-          Product: { select: { id: true, name: true, productCode: true } },
+          Product: { select: { id: true, name: true, productCode: true, mrp: true } },
         },
       },
     },
@@ -181,6 +266,7 @@ export async function searchOrders(args: SearchOrdersArgs) {
     products: order.OrderItem.slice(0, 8).map((item) => ({
       name: item.Product?.name,
       code: item.Product?.productCode,
+      mrp: item.Product?.mrp ?? null,
       quantity: item.quantity,
     })),
   }));
@@ -263,7 +349,7 @@ export async function getOrder(args: GetOrderArgs) {
           sellingPricePerPacketForDb: true,
           sellingPricePerCartonForRss: true,
           sellingPricePerPacketForRss: true,
-          Product: { select: { id: true, name: true, productCode: true } },
+          Product: { select: { id: true, name: true, productCode: true, mrp: true } },
         },
       },
       _count: { select: { StockRecord: true } },
@@ -277,6 +363,7 @@ export async function getOrder(args: GetOrderArgs) {
     return {
       product: item.Product?.name ?? "Unknown",
       code: item.Product?.productCode ?? null,
+      mrp: item.Product?.mrp ?? null,
       quantity: item.quantity,
       ratePerCarton: rates?.carton ?? null,
       gstPercent: rates?.gstPercent ?? null,
@@ -356,19 +443,10 @@ function round1(value: number): number {
 }
 
 async function resolveHistoryCustomer(args: CustomerOrderHistoryArgs) {
-  const select = {
-    id: true,
-    name: true,
-    CustomerDetail: {
-      select: { dbName: true, dbCategory: true, area: true, state: true },
-      take: 1,
-    },
-  } as const;
-
   if (args.customerId) {
     const customer = await prisma.user.findFirst({
       where: { id: args.customerId, userType: "CUSTOMER" },
-      select,
+      select: historyCustomerSelect,
     });
     if (!customer) throw new Error("Customer not found for the supplied customerId");
     return { customer, candidates: [], needsDisambiguation: false };
@@ -384,60 +462,36 @@ async function resolveHistoryCustomer(args: CustomerOrderHistoryArgs) {
     where: {
       userType: "CUSTOMER",
       OR: [
-        { name: { contains: name } },
-        { CustomerDetail: { some: { dbName: { contains: name } } } },
+        { name: { contains: name, mode: "insensitive" } },
+        {
+          CustomerDetail: {
+            some: { dbName: { contains: name, mode: "insensitive" } },
+          },
+        },
       ],
     },
     take: 30,
-    select,
+    select: historyCustomerSelect,
   });
 
-  const scored = customers
-    .map((customer) => {
-      const detail = customer.CustomerDetail[0];
-      const dbName = detail?.dbName ?? customer.name;
-      const normalizedQuery = normalizeText(name);
-      const normalizedRawQuery = normalizeText(raw);
-      const normalizedDbName = normalizeText(dbName);
-      const normalizedContactName = normalizeText(customer.name);
+  let scored = rankHistoryCustomers(customers, name, raw, qualifier);
 
-      let score = Math.max(similarity(name, dbName), similarity(name, customer.name));
-      if (normalizedDbName === normalizedQuery || normalizedDbName === normalizedRawQuery) {
-        score += 10;
-      }
-      if (
-        normalizedContactName === normalizedQuery ||
-        normalizedContactName === normalizedRawQuery
-      ) {
-        score += 8;
-      } else if (
-        normalizedQuery.length >= 3 &&
-        (normalizedDbName.includes(normalizedQuery) ||
-          normalizedQuery.includes(normalizedDbName))
-      ) {
-        score += 2;
-      }
-
-      if (qualifier) {
-        const normalizedQualifier = normalizeText(qualifier);
-        const area = normalizeText(detail?.area);
-        const state = normalizeText(detail?.state);
-        if (
-          area &&
-          (area.includes(normalizedQualifier) || normalizedQualifier.includes(area))
-        ) {
-          score += 6;
-        } else if (
-          state &&
-          (state.includes(normalizedQualifier) || normalizedQualifier.includes(state))
-        ) {
-          score += 3;
-        }
-      }
-
-      return { customer, dbName, score };
-    })
-    .sort((a, b) => b.score - a.score);
+  // The DB prefilter is only a shortcut. If it did not produce a clear winner,
+  // do a bounded in-memory scan so casing, punctuation, or extra words do not
+  // hide a real customer (e.g. "sri bajrang traders").
+  if (!isDecisiveCustomerMatch(scored)) {
+    const allCustomers = await prisma.user.findMany({
+      where: { userType: "CUSTOMER" },
+      take: 5000,
+      select: historyCustomerSelect,
+    });
+    const rescored = rankHistoryCustomers(allCustomers, name, raw, qualifier).filter(
+      (entry) => entry.score >= 0.6
+    );
+    if (!scored.length || (rescored[0]?.score ?? 0) > (scored[0]?.score ?? 0)) {
+      scored = rescored;
+    }
+  }
 
   if (scored.length === 0) {
     return { customer: null, candidates: [], needsDisambiguation: true };
@@ -475,6 +529,7 @@ interface HistoryProductAggregate {
   id: string;
   code: string;
   name: string;
+  mrp: number;
   isDiscontinued: boolean;
   appearances: number;
   totalQuantity: number;
@@ -547,7 +602,13 @@ export async function customerOrderHistory(args: CustomerOrderHistoryArgs) {
         select: {
           quantity: true,
           Product: {
-            select: { id: true, name: true, productCode: true, isDiscontinued: true },
+            select: {
+              id: true,
+              name: true,
+              productCode: true,
+              mrp: true,
+              isDiscontinued: true,
+            },
           },
         },
       },
@@ -614,6 +675,7 @@ export async function customerOrderHistory(args: CustomerOrderHistoryArgs) {
           id: entry.product.id,
           code: entry.product.productCode,
           name: entry.product.name,
+          mrp: entry.product.mrp,
           isDiscontinued: Boolean(entry.product.isDiscontinued),
           appearances: 0,
           totalQuantity: 0,
@@ -679,6 +741,7 @@ export async function customerOrderHistory(args: CustomerOrderHistoryArgs) {
         id: aggregate.id,
         code: aggregate.code,
         name: aggregate.name,
+        mrp: aggregate.mrp,
         appearances: aggregate.appearances,
         ordersUsed: orders.length,
         frequency: round1(aggregate.appearances / orders.length),
@@ -717,6 +780,7 @@ export async function customerOrderHistory(args: CustomerOrderHistoryArgs) {
       productId: product.id,
       productCode: product.code,
       productName: product.name,
+      mrp: product.mrp,
       quantity: product.suggestedCartons,
       quantityBasis: product.quantityBasis,
       evidence: product.evidence,
@@ -734,6 +798,7 @@ export async function customerOrderHistory(args: CustomerOrderHistoryArgs) {
     lines: [...record.perProduct.values()].map((entry) => ({
       code: entry.product.productCode,
       name: entry.product.name,
+      mrp: entry.product.mrp,
       qty: entry.quantity,
     })),
   }));
@@ -852,7 +917,12 @@ export async function customerOrderHistory(args: CustomerOrderHistoryArgs) {
     rules: {
       inclusionRule,
       quantityRule,
-      majorityThreshold: `at least ${majorityThreshold} of ${orders.length} orders`,
+      includeIf:
+        inclusionRule === "any"
+          ? `appeared in at least one of the last ${orders.length} evaluated orders`
+          : inclusionRule === "latest"
+            ? "present in the most recent evaluated order"
+            : `appeared in at least ${majorityThreshold} of ${orders.length} evaluated orders`,
     },
     orders: orderSummaries,
     products: visibleProducts,
@@ -1204,10 +1274,10 @@ export async function searchCustomers(args: SearchCustomersArgs) {
   const where: Prisma.UserWhereInput = { userType: "CUSTOMER" };
   if (queries.length) {
     where.OR = queries.flatMap((query) => [
-      { name: { contains: query } },
-      { email: { contains: query } },
+      { name: { contains: query, mode: "insensitive" } },
+      { email: { contains: query, mode: "insensitive" } },
       { phone: { contains: query } },
-      { CustomerDetail: { some: { dbName: { contains: query } } } },
+      { CustomerDetail: { some: { dbName: { contains: query, mode: "insensitive" } } } },
     ]);
   }
 
@@ -1290,7 +1360,7 @@ export async function searchTransporters(args: SearchTransportersArgs) {
 
   const transporters = await prisma.transporter.findMany({
     where: queries.length
-      ? { OR: queries.map((query) => ({ name: { contains: query } })) }
+      ? { OR: queries.map((query) => ({ name: { contains: query, mode: "insensitive" } })) }
       : {},
     take: limit + 1,
     orderBy: { name: "asc" },

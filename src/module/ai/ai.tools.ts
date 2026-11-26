@@ -70,7 +70,7 @@ export const AI_TOOLS = [
     function: {
       name: "search_orders",
       description:
-        "Search orders with filters. Returns compact order rows including status, customer, cartons, and product lines. Excludes unfinalized distributor drafts. Uses the last 30 days for general searches, but open-status searches (PENDING etc.) span all time unless dates are provided.",
+        "Search orders with filters. Returns compact order rows including status, customer, cartons, and product lines with MRP. Excludes unfinalized distributor drafts. Uses the last 30 days for general searches, but open-status searches (PENDING etc.) span all time unless dates are provided.",
       parameters: {
         type: "object",
         properties: {
@@ -93,7 +93,7 @@ export const AI_TOOLS = [
     function: {
       name: "get_order",
       description:
-        "Get one order by internal id or customer-facing order code. Returns customer, status, verification, dates, lines, cartons, and stock-record count.",
+        "Get one order by internal id or customer-facing order code. Returns customer, status, verification, dates, lines with MRP, cartons, and stock-record count.",
       parameters: {
         type: "object",
         properties: {
@@ -108,7 +108,7 @@ export const AI_TOOLS = [
     function: {
       name: "customer_order_history",
       description:
-        "REQUIRED before suggesting or drafting any repeat/reorder order from a customer's purchase history. Resolves the customer, reads their last N orders with line items (no 30-day cutoff, completed/verified orders included), and computes per-product frequency, cartons, averages, inclusion under the chosen rule, suggested quantities, and anomaly/data-quality notes. Returns real order codes, dates, statuses, line items, and totals. Never invent these numbers; call this tool and use its result.",
+        "REQUIRED before suggesting or drafting any repeat/reorder order from a customer's purchase history. Resolves the customer, reads their last N orders with line items (no 30-day cutoff, completed/verified orders included), and computes per-product frequency, cartons, MRP, averages, inclusion under the chosen rule, suggested quantities, and anomaly/data-quality notes. Returns real order codes, dates, statuses, line items with MRP, and totals. Never invent these numbers; call this tool and use its result.",
       parameters: {
         type: "object",
         properties: {
@@ -345,7 +345,7 @@ export const AI_TOOLS = [
     function: {
       name: "propose_create_order_draft",
       description:
-        "Propose a new unverified PENDING order draft. This DOES NOT create anything; it returns a confirmation card. The server resolves the customer and every product from names/codes in ONE pass, so you can pass natural names or exact codes directly — no prior search tools are required.",
+        "Propose a new unverified PENDING order draft. This DOES NOT create anything; it returns a confirmation card. The server resolves the customer and every product from names/codes in ONE pass, so you can pass natural names or exact codes directly — no prior search tools are required. The card preview includes each product's MRP, carton quantity, rate per carton, and the estimated total.",
       parameters: {
         type: "object",
         properties: {

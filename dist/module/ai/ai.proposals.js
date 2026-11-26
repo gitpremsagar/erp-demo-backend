@@ -78,6 +78,7 @@ async function proposeCreateOrderDraft(args, actorId) {
         tableRows.push([
             product.name,
             product.productCode,
+            (0, ai_utils_1.formatInr)(product.mrp),
             (0, ai_utils_1.formatNumber)(item.quantity),
             rates ? (0, ai_utils_1.formatInr)(rates.carton) : "Pricing missing",
             rates ? (0, ai_utils_1.formatInr)(lineTotal) : "—",
@@ -126,7 +127,7 @@ async function proposeCreateOrderDraft(args, actorId) {
                 },
             ],
             table: {
-                columns: ["Product", "Code", "Qty", "Rate/carton", "Est. line"],
+                columns: ["Product", "Code", "MRP", "Qty", "Rate/carton", "Est. line"],
                 rows: tableRows,
             },
             totals: [

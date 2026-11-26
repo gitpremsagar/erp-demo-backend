@@ -121,6 +121,7 @@ export async function proposeCreateOrderDraft(
     tableRows.push([
       product.name,
       product.productCode,
+      formatInr(product.mrp),
       formatNumber(item.quantity),
       rates ? formatInr(rates.carton) : "Pricing missing",
       rates ? formatInr(lineTotal) : "—",
@@ -168,7 +169,7 @@ export async function proposeCreateOrderDraft(
         },
       ],
       table: {
-        columns: ["Product", "Code", "Qty", "Rate/carton", "Est. line"],
+        columns: ["Product", "Code", "MRP", "Qty", "Rate/carton", "Est. line"],
         rows: tableRows,
       },
       totals: [

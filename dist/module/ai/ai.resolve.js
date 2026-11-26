@@ -48,10 +48,10 @@ async function resolveCustomer(input) {
             userType: "CUSTOMER",
             OR: [
                 ...((0, ai_utils_1.isObjectId)(query) ? [{ id: query }] : []),
-                { name: { contains: query } },
-                { email: { contains: query } },
+                { name: { contains: query, mode: "insensitive" } },
+                { email: { contains: query, mode: "insensitive" } },
                 { phone: { contains: query } },
-                { CustomerDetail: { some: { dbName: { contains: query } } } },
+                { CustomerDetail: { some: { dbName: { contains: query, mode: "insensitive" } } } },
             ],
         },
         take: 10,
@@ -162,7 +162,7 @@ async function resolveTransporter(input) {
     if (catalogMatch.match)
         return catalogMatch.match;
     const candidates = await prisma_1.prisma.transporter.findMany({
-        where: { name: { contains: query } },
+        where: { name: { contains: query, mode: "insensitive" } },
         take: 8,
         select: { id: true, name: true },
     });

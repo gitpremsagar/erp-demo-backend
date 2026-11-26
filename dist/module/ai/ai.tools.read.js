@@ -29,6 +29,62 @@ const distributorDraftVisibility = {
         OrderCreator: { is: { userType: "CUSTOMER" } },
     },
 };
+const historyCustomerSelect = {
+    id: true,
+    name: true,
+    CustomerDetail: {
+        select: { dbName: true, dbCategory: true, area: true, state: true },
+        take: 1,
+    },
+};
+function rankHistoryCustomers(customers, name, raw, qualifier) {
+    const normalizedQuery = (0, ai_utils_1.normalizeText)(name);
+    const normalizedRawQuery = (0, ai_utils_1.normalizeText)(raw);
+    return customers
+        .map((customer) => {
+        const detail = customer.CustomerDetail[0];
+        const dbName = detail?.dbName ?? customer.name;
+        const normalizedDbName = (0, ai_utils_1.normalizeText)(dbName);
+        const normalizedContactName = (0, ai_utils_1.normalizeText)(customer.name);
+        let score = Math.max((0, ai_utils_1.similarity)(name, dbName), (0, ai_utils_1.similarity)(name, customer.name));
+        if (normalizedDbName === normalizedQuery || normalizedDbName === normalizedRawQuery) {
+            score += 10;
+        }
+        if (normalizedContactName === normalizedQuery ||
+            normalizedContactName === normalizedRawQuery) {
+            score += 8;
+        }
+        else if (normalizedQuery.length >= 3 &&
+            (normalizedDbName.includes(normalizedQuery) ||
+                normalizedQuery.includes(normalizedDbName))) {
+            score += 2;
+        }
+        if (qualifier) {
+            const normalizedQualifier = (0, ai_utils_1.normalizeText)(qualifier);
+            const area = (0, ai_utils_1.normalizeText)(detail?.area);
+            const state = (0, ai_utils_1.normalizeText)(detail?.state);
+            if (area &&
+                (area.includes(normalizedQualifier) || normalizedQualifier.includes(area))) {
+                score += 6;
+            }
+            else if (state &&
+                (state.includes(normalizedQualifier) || normalizedQualifier.includes(state))) {
+                score += 3;
+            }
+        }
+        return { customer, dbName, score };
+    })
+        .sort((a, b) => b.score - a.score);
+}
+function isDecisiveCustomerMatch(scored) {
+    const best = scored[0];
+    const second = scored[1];
+    if (!best)
+        return false;
+    return (scored.length === 1 ||
+        (second ? best.score - second.score >= 4 : true) ||
+        best.score >= 12);
+}
 function statusLabel(status) {
     if (!status)
         return "No status";
@@ -65,11 +121,13 @@ async function searchOrders(args) {
     if (args.customerName) {
         and.push({
             OR: [
-                { Customer: { is: { name: { contains: args.customerName } } } },
+                { Customer: { is: { name: { contains: args.customerName, mode: "insensitive" } } } },
                 {
                     Customer: {
                         is: {
-                            CustomerDetail: { some: { dbName: { contains: args.customerName } } },
+                            CustomerDetail: {
+                                some: { dbName: { contains: args.customerName, mode: "insensitive" } },
+                            },
                         },
                     },
                 },
@@ -80,12 +138,14 @@ async function searchOrders(args) {
     if (query) {
         and.push({
             OR: [
-                { customeOrderId: { contains: query } },
-                { Customer: { is: { name: { contains: query } } } },
+                { customeOrderId: { contains: query, mode: "insensitive" } },
+                { Customer: { is: { name: { contains: query, mode: "insensitive" } } } },
                 {
                     Customer: {
                         is: {
-                            CustomerDetail: { some: { dbName: { contains: query } } },
+                            CustomerDetail: {
+                                some: { dbName: { contains: query, mode: "insensitive" } },
+                            },
                         },
                     },
                 },
@@ -120,7 +180,7 @@ async function searchOrders(args) {
             OrderItem: {
                 select: {
                     quantity: true,
-                    Product: { select: { id: true, name: true, productCode: true } },
+                    Product: { select: { id: true, name: true, productCode: true, mrp: true } },
                 },
             },
         },
@@ -143,6 +203,7 @@ async function searchOrders(args) {
         products: order.OrderItem.slice(0, 8).map((item) => ({
             name: item.Product?.name,
             code: item.Product?.productCode,
+            mrp: item.Product?.mrp ?? null,
             quantity: item.quantity,
         })),
     }));
@@ -222,7 +283,7 @@ async function getOrder(args) {
                     sellingPricePerPacketForDb: true,
                     sellingPricePerCartonForRss: true,
                     sellingPricePerPacketForRss: true,
-                    Product: { select: { id: true, name: true, productCode: true } },
+                    Product: { select: { id: true, name: true, productCode: true, mrp: true } },
                 },
             },
             _count: { select: { StockRecord: true } },
@@ -235,6 +296,7 @@ async function getOrder(args) {
         return {
             product: item.Product?.name ?? "Unknown",
             code: item.Product?.productCode ?? null,
+            mrp: item.Product?.mrp ?? null,
             quantity: item.quantity,
             ratePerCarton: rates?.carton ?? null,
             gstPercent: rates?.gstPercent ?? null,
@@ -301,18 +363,10 @@ function round1(value) {
     return Math.round(value * 10) / 10;
 }
 async function resolveHistoryCustomer(args) {
-    const select = {
-        id: true,
-        name: true,
-        CustomerDetail: {
-            select: { dbName: true, dbCategory: true, area: true, state: true },
-            take: 1,
-        },
-    };
     if (args.customerId) {
         const customer = await prisma_1.prisma.user.findFirst({
             where: { id: args.customerId, userType: "CUSTOMER" },
-            select,
+            select: historyCustomerSelect,
         });
         if (!customer)
             throw new Error("Customer not found for the supplied customerId");
@@ -328,50 +382,32 @@ async function resolveHistoryCustomer(args) {
         where: {
             userType: "CUSTOMER",
             OR: [
-                { name: { contains: name } },
-                { CustomerDetail: { some: { dbName: { contains: name } } } },
+                { name: { contains: name, mode: "insensitive" } },
+                {
+                    CustomerDetail: {
+                        some: { dbName: { contains: name, mode: "insensitive" } },
+                    },
+                },
             ],
         },
         take: 30,
-        select,
+        select: historyCustomerSelect,
     });
-    const scored = customers
-        .map((customer) => {
-        const detail = customer.CustomerDetail[0];
-        const dbName = detail?.dbName ?? customer.name;
-        const normalizedQuery = (0, ai_utils_1.normalizeText)(name);
-        const normalizedRawQuery = (0, ai_utils_1.normalizeText)(raw);
-        const normalizedDbName = (0, ai_utils_1.normalizeText)(dbName);
-        const normalizedContactName = (0, ai_utils_1.normalizeText)(customer.name);
-        let score = Math.max((0, ai_utils_1.similarity)(name, dbName), (0, ai_utils_1.similarity)(name, customer.name));
-        if (normalizedDbName === normalizedQuery || normalizedDbName === normalizedRawQuery) {
-            score += 10;
+    let scored = rankHistoryCustomers(customers, name, raw, qualifier);
+    // The DB prefilter is only a shortcut. If it did not produce a clear winner,
+    // do a bounded in-memory scan so casing, punctuation, or extra words do not
+    // hide a real customer (e.g. "sri bajrang traders").
+    if (!isDecisiveCustomerMatch(scored)) {
+        const allCustomers = await prisma_1.prisma.user.findMany({
+            where: { userType: "CUSTOMER" },
+            take: 5000,
+            select: historyCustomerSelect,
+        });
+        const rescored = rankHistoryCustomers(allCustomers, name, raw, qualifier).filter((entry) => entry.score >= 0.6);
+        if (!scored.length || (rescored[0]?.score ?? 0) > (scored[0]?.score ?? 0)) {
+            scored = rescored;
         }
-        if (normalizedContactName === normalizedQuery ||
-            normalizedContactName === normalizedRawQuery) {
-            score += 8;
-        }
-        else if (normalizedQuery.length >= 3 &&
-            (normalizedDbName.includes(normalizedQuery) ||
-                normalizedQuery.includes(normalizedDbName))) {
-            score += 2;
-        }
-        if (qualifier) {
-            const normalizedQualifier = (0, ai_utils_1.normalizeText)(qualifier);
-            const area = (0, ai_utils_1.normalizeText)(detail?.area);
-            const state = (0, ai_utils_1.normalizeText)(detail?.state);
-            if (area &&
-                (area.includes(normalizedQualifier) || normalizedQualifier.includes(area))) {
-                score += 6;
-            }
-            else if (state &&
-                (state.includes(normalizedQualifier) || normalizedQualifier.includes(state))) {
-                score += 3;
-            }
-        }
-        return { customer, dbName, score };
-    })
-        .sort((a, b) => b.score - a.score);
+    }
     if (scored.length === 0) {
         return { customer: null, candidates: [], needsDisambiguation: true };
     }
@@ -458,7 +494,13 @@ async function customerOrderHistory(args) {
                 select: {
                     quantity: true,
                     Product: {
-                        select: { id: true, name: true, productCode: true, isDiscontinued: true },
+                        select: {
+                            id: true,
+                            name: true,
+                            productCode: true,
+                            mrp: true,
+                            isDiscontinued: true,
+                        },
                     },
                 },
             },
@@ -513,6 +555,7 @@ async function customerOrderHistory(args) {
                     id: entry.product.id,
                     code: entry.product.productCode,
                     name: entry.product.name,
+                    mrp: entry.product.mrp,
                     isDiscontinued: Boolean(entry.product.isDiscontinued),
                     appearances: 0,
                     totalQuantity: 0,
@@ -579,6 +622,7 @@ async function customerOrderHistory(args) {
             id: aggregate.id,
             code: aggregate.code,
             name: aggregate.name,
+            mrp: aggregate.mrp,
             appearances: aggregate.appearances,
             ordersUsed: orders.length,
             frequency: round1(aggregate.appearances / orders.length),
@@ -614,6 +658,7 @@ async function customerOrderHistory(args) {
         productId: product.id,
         productCode: product.code,
         productName: product.name,
+        mrp: product.mrp,
         quantity: product.suggestedCartons,
         quantityBasis: product.quantityBasis,
         evidence: product.evidence,
@@ -630,6 +675,7 @@ async function customerOrderHistory(args) {
         lines: [...record.perProduct.values()].map((entry) => ({
             code: entry.product.productCode,
             name: entry.product.name,
+            mrp: entry.product.mrp,
             qty: entry.quantity,
         })),
     }));
@@ -698,7 +744,11 @@ async function customerOrderHistory(args) {
         rules: {
             inclusionRule,
             quantityRule,
-            majorityThreshold: `at least ${majorityThreshold} of ${orders.length} orders`,
+            includeIf: inclusionRule === "any"
+                ? `appeared in at least one of the last ${orders.length} evaluated orders`
+                : inclusionRule === "latest"
+                    ? "present in the most recent evaluated order"
+                    : `appeared in at least ${majorityThreshold} of ${orders.length} evaluated orders`,
         },
         orders: orderSummaries,
         products: visibleProducts,
@@ -996,10 +1046,10 @@ async function searchCustomers(args) {
     const where = { userType: "CUSTOMER" };
     if (queries.length) {
         where.OR = queries.flatMap((query) => [
-            { name: { contains: query } },
-            { email: { contains: query } },
+            { name: { contains: query, mode: "insensitive" } },
+            { email: { contains: query, mode: "insensitive" } },
             { phone: { contains: query } },
-            { CustomerDetail: { some: { dbName: { contains: query } } } },
+            { CustomerDetail: { some: { dbName: { contains: query, mode: "insensitive" } } } },
         ]);
     }
     const customers = await prisma_1.prisma.user.findMany({
@@ -1065,7 +1115,7 @@ async function searchTransporters(args) {
     const limit = (0, ai_utils_1.toPositiveInt)(args.limit, queries.length > 1 ? Math.min(25, Math.max(10, queries.length * 3)) : 10, 25);
     const transporters = await prisma_1.prisma.transporter.findMany({
         where: queries.length
-            ? { OR: queries.map((query) => ({ name: { contains: query } })) }
+            ? { OR: queries.map((query) => ({ name: { contains: query, mode: "insensitive" } })) }
             : {},
         take: limit + 1,
         orderBy: { name: "asc" },
